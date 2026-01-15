@@ -1,0 +1,88 @@
+% !TEX program = pdflatex
+\documentclass[11pt,a4paper]{article}
+\usepackage[UTF8]{ctex}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{geometry}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{集成双层公交优化的列生成方法说明}
+\author{项目文档}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{概述}
+本文档面向 Overleaf 使用，说明我们在集成双层（系统成本 + 用户均衡）模型中的列生成（Column Generation, CG）流程。核心思想：
+\begin{itemize}
+  \item 主问题（Restricted Master Problem, RMP）是完整 MILP 的线性松弛，仅在当前列集合 $\Omega$ 上求解；
+  \item 子问题（Pricing）利用主问题对偶变量，搜索具有最大\emph{正}“增益”的线路列（即具有正的“约化利润/降低成本”）；
+  \item 迭代添加新列，直至没有正增益列，再转 Phase II 在固定列集上求解整数化（得到上界）。
+\end{itemize}
+
+\section*{集合与记号}
+\begin{itemize}
+  \item $\mathcal{O},\mathcal{D}$：起讫点集合；$\mathcal{H}$：人群细分集合；
+  \item $\mathcal{A}$：路段集合（有向边）；$\Omega$：当前可用的公交线路列集合（每一列对应一条可运营的候选线路/路径，含频率档信息）。
+  \item $D_{od,h}$：$(o,d,h)$ 需求；$\delta_{ap}\in\{0,1\}$：列 $p$ 是否经过路段 $a$；
+  \item 成本：$F$ 为每条线路的固定成本，$c_p^{op}\ge 0$ 为列 $p$ 的可变运营成本（基于里程/频率），$c^{bg}(\cdot)$ 为背景交通的（Beckmann）成本，$c^{user}(\cdot)$ 为用户的广义时间成本；
+  \item 主问题约束的对偶变量：$\gamma_{od,h}$（需求/守恒相关），$\rho_a$（路段流量相关）。
+\end{itemize}
+
+\section*{主问题（RMP：LP 松弛）}
+记决策变量 $x_p\ge 0$ 表示选择列 $p\in\Omega$ 的“强度”（Phase I 为连续松弛；Phase II 再转整数化）。RMP 的目标是最小化系统总成本（运营 + 用户 + 背景），其中与列直接相关的部分写为 $F + c_p^{op}$：
+\begin{align}
+  \min_{x,\,\text{others}}\; Z_{\text{RMP}} 
+  &= \sum_{p\in\Omega} (F + c_p^{op})\, x_p 
+     + c^{user}(\cdot) + c^{bg}(\cdot). \label{eq:rmp_obj}
+\end{align}
+
+为与定价（pricing）联动，给出两类关键约束（其余与 SUE 外逼近相关的凸约束此处省略）：
+\begin{align}
+  \text{(需求/守恒)}\quad 
+  &\sum_{p\in\Omega: p\ \text{服务}\ (o,d)} x_p \;\; \text{与}\; D_{od,h}\; \text{满足守恒/分配关系}, &&\forall\, (o,d)\in\mathcal{O}\times\mathcal{D},\; h\in\mathcal{H}, \label{eq:rmp_dem}\[4pt]
+  \text{(路段流量一致)}\quad 
+  &v_a^{bg} + \sum_{p\in\Omega} \delta_{ap}\, x_p \;\; \text{与容量/流量定义一致}, &&\forall\, a\in\mathcal{A}. \label{eq:rmp_link}
+\end{align}
+
+对上述两类约束分别记对偶变量为 $\gamma_{od,h}$ 与 $\rho_a$。RMP 在当前 $\Omega$ 下达到最优时，我们从求解器中读取这些对偶值，交给定价子问题使用。
+
+\paragraph{注} 实现中 RMP 是完整 MILP 的 LP 松弛版本（去除了整数与 KKT 对偶块），并包含 Beckmann 与熵项的外逼近切平面；具体线性化细节在工程代码中实现，但不影响列生成的结构化描述。
+
+\section*{子问题（Pricing）：最优增益线路搜索}
+定价问题在给定对偶 $(\gamma,\rho)$ 后，寻找一条新线路（记为路径 $p$）使得其“增益”最大。我们使用如下的“增益/约化利润”定义（与实现一致，采用“正增益则加入”的判据）：
+\begin{align}
+  \Delta(p; o,d,h) 
+  &= \underbrace{\gamma_{od,h}}_{\text{需求对偶}}
+     - \underbrace{\Big(F + c_p^{op}\Big)}_{\text{固定+运营成本}}
+     - \underbrace{\sum_{a\in p} \rho_a}_{\text{路段对偶影响}}. \label{eq:reduced_cost}
+\end{align}
+当存在 $\Delta(p; o,d,h) > 0$ 的线路列时，将其加入 $\Omega$。如果对所有 $(o,d,h)$ 与候选路径 $p$ 都有 $\Delta\le 0$，则定价终止。
+
+在实现上，我们令路径搜索的边权仅取非负的\emph{运营成本权重}（例如 $w_a\ge 0$，基于里程×单位成本），使用最短路/\emph{k}-最短路方法生成候选路径 $p$；随后再根据式\eqref{eq:reduced_cost} 叠加对偶项 $\sum_a \rho_a$ 与固定成本 $F$，计算真正的 $\Delta$。这样可避免负权导致的算法与库函数不稳定问题。
+
+\section*{列生成算法（Phase I）}
+\noindent 算法骨架如下：
+\begin{enumerate}
+  \item 初始化列集 $\Omega\leftarrow\Omega_0$（可用空集或少量启发式线路）。
+  \item \textbf{主问题求解}：在 $\Omega$ 上求解 RMP（LP 松弛）得到最优值 $Z_{\text{RMP}}$，并提取对偶 $\gamma,\rho$。
+  \item \textbf{定价子问题}：对每个 $(o,d,h)$，用非负运营权重在图上做最短路搜索，得到候选路径 $p$，计算 $\Delta(p; o,d,h)$。可一次加入前 $k$ 条正增益路径以加速收敛。
+  \item 若所有候选的 $\Delta\le 0$，\textbf{停止}（Phase I 收敛）；否则，将所有 $\Delta>0$ 的列加入 $\Omega$，返回第 2 步。
+\end{enumerate}
+
+\section*{Phase II：固定列集上的整数求解}
+当 Phase I 无正增益列可加入时，当前 $Z_{\text{RMP}}$ 给出下界。此时在固定的 $\Omega$ 上恢复整数性（例如线路启用/频率档的 0-1/整数变量），求解 MILP 获得可行解与上界 $Z_{\text{MILP}}$，并计算间隙。若需要可继续用分支定界或切割加强。
+
+\section*{实现与参数要点}
+\begin{itemize}
+  \item \textbf{对偶提取：} 我们以约束命名（如 demand\_elastic\_\{o\}\_\{d\}\_\{h\}、link\_flow\_(u,v)）从求解器读取 $\gamma_{od,h},\rho_a$，避免 $O(n^2)$ 解析开销。
+  \item \textbf{定价权重：} 路径搜索仅使用非负运营权重，\emph{对偶只参与式\eqref{eq:reduced_cost} 的增益计算}，以保证图算法稳定。
+  \item \textbf{成本标度：} 固定成本 $F$ 与单位运营成本需与对偶量纲匹配；实践中调参（如将 $F=10$）后，能稳定产生正增益列并加速收敛。
+  \item \textbf{日志与监控：} 记录每次迭代的模型规模、RMP 目标、对偶稀疏度、候选列的 $\Delta$ 统计以及新增列数量，有助于诊断与调参。
+\end{itemize}
+
+\section*{小结}
+以上给出了我们在集成双层公交优化中使用列生成的结构化做法：RMP 为完整模型的 LP 松弛，定价子问题用最短路搜索新线路并以对偶评估其增益，循环至无正增益列后进行 Phase II 整数化求解。该流程在工程实现中与 Gurobi 对偶读出、非负权重定价与现实参数标度保持一致。
+
+\end{document}

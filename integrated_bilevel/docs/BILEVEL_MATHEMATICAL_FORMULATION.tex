@@ -1,0 +1,1220 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{tabularx}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+
+\title{Integrated Bilevel Optimization for Bus Route Design and Frequency Setting}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+\section*{Notation and Variables}
+\addcontentsline{toc}{section}{Notation and Variables}
+
+\subsection*{Sets and Indices}
+\begin{tabularx}{\textwidth}{@{} l X @{}}
+\hline
+符号 & 说明 \\
+\hline
+$N$ & Set of nodes \\
+$A$ & Set of directed links $a=(u,v)$ \\
+$K$ & Set of OD pairs $w=(o,d)$ \\
+$H$ & Set of user segments $h$ \\
+$M_h$ & Feasible modes for segment $h$ \\
+$h^{\text{drv}}, h^{\text{non-drv}}$ & (Optional) evac split: drivers vs. non-drivers \\
+$m$ & Mode index, $m\in\{D,X,B,R,W,O\}$ \\
+$R$ & Set of candidate bus routes \\
+$J$ & Set of headway/frequency options \\
+$K_w^m$ & Candidate paths for OD $w$ and mode $m$ \\
+$k$ & Path index, $k\in K_w^m$ \\
+$\mathcal{M}_{Fixed}$ & Fixed-demand modes (currently Auto) \\
+$\mathcal{M}_{Choice}$ & Elastic-demand modes (Bus, RH, Metro, Other) \\
+$\{\phi_r\}$ & Flow/capacity ratios for Beckmann/BPR breakpoints \\
+\hline
+\end{tabularx}
+
+\subsection*{Parameters}
+\begin{tabularx}{\textwidth}{@{} l X @{}}
+\hline
+符号 & 说明 \\
+\hline
+$t_a^0$ [h] & Free-flow travel time on link $a$ \\
+$C_a$ & Capacity of link $a$ \\
+$\alpha$ & BPR parameter (default $0.15$) \\
+$\beta$ & BPR parameter (default $4$) \\
+$\bar{v}_a$ & Exogenous background flow on link $a$ (non-decision) \\
+$D_{odh}$ & Demand from $o$ to $d$ for segment $h$ \\
+$D_w$ & Total demand for OD $w$: $\sum_h D_{odh}$ \\
+$\bar{D}_w^{Auto}$ & Fixed (captive) demand for auto mode on OD $w$ \\
+$O_m$ & Occupancy: passengers per vehicle for mode $m$ \\
+$\eta_m$ & PCE factor: passenger car equivalents for mode $m$ \\
+$WT_{pickup}^{RH}$ & Pickup wait time for ride-hailing mode (variable, congestion-dependent) \\
+$\text{VOT}_h$ & Value of time for segment $h$ \\
+$\text{VOT}_{\text{bg}}$ & Background value of time \\
+$\hat{C}^{\text{op-env}}_{m}$ & Per-hour env/operational cost for mode $m\in\{D,X,\text{bg}\}$ \\
+$\text{FC}_r$ & Fixed cost to activate bus route $r$ \\
+$C_{\text{fleet}}$ & Per-bus fleet cost (purchase/maintenance) \\
+$H_j$ [h] & Headway for option $j\in J$ \\
+$C_B$ & Bus capacity per vehicle \\
+$\Psi_{odh}^m$ & Fixed utility for exogenous modes $m\in\{R,W,O\}$ \\
+$\text{Cost}_{od}^{m}$ & Monetary trip cost for $m\in\{D,X\}$ \\
+$\kappa_m$ & Cost coefficient for mode $m$ \\
+$\theta$ & SUE entropy weight (dispersion) \\
+$\mu$ & MNL entropy weight (scale) \\
+\hline
+\end{tabularx}
+
+\subsection*{Upper-Level Decision Variables}
+\begin{tabularx}{\textwidth}{@{} l X @{}}
+\hline
+符号 & 说明 \\
+\hline
+$x_r\in\{0,1\}$ & Activate bus route $r$ \\
+$w_{rj}\in\{0,1\}$ & Select headway option $j$ for route $r$ (at most one) \\
+$n_r\in\mathbb{Z}_+$ & Number of buses allocated to route $r$ \\
+\hline
+\end{tabularx}
+
+\subsection*{Lower-Level Primal Variables}
+\begin{tabularx}{\textwidth}{@{} l X @{}}
+\hline
+符号 & 说明 \\
+\hline
+$v_a\ge0$ & Total flow on link $a$ \\
+$f_k\ge0$ & Path flow for path $k$ (defined over $K_w^m$; aggregated over segments unless noted) \\
+$q_{odh}^m\ge0$ & Demand assigned to mode $m$ for OD $w{=}(o,d)$ and segment $h$ (can be pre-aggregated to $q_w^m$ after enforcing $M_h$) \\
+\hline
+\end{tabularx}
+
+\subsection*{Lower-Level Dual Variables}
+\begin{tabularx}{\textwidth}{@{} l X @{}}
+\hline
+符号 & 说明 \\
+\hline
+$\rho_a$ & Dual for link-flow definition and Beckmann cuts \\
+$\lambda_{od}^m$ & Dual for path-to-mode conservation (per OD and mode) \\
+$\gamma_{od}$ & Dual for OD demand conservation \\
+\hline
+\end{tabularx}
+
+\subsection*{Auxiliary Variables and Linearization Cuts}
+\begin{tabularx}{\textwidth}{@{} l X @{}}
+\hline
+符号 & 说明 \\
+\hline
+$\tau_a\ge0$ & Piecewise-linear approximation of Beckmann integral on link $a$ \\
+$\varphi_k\ge0$ & Tangent-based approximation for path entropy $f_k\ln f_k$ \\
+$\xi_{odh}^m\ge0$ & Tangent-based approximation for mode entropy $q\ln q$ \\
+$\tilde{t}_a\ge0$ & Piecewise-linear BPR travel time for background cost (upper level) \\
+$\zeta^{\text{f-time}}_{k}\ge0$ & McCormick variable for $f_k\cdot t_k$ (auto $D/X$) \\
+$\zeta^{\text{f-TT}}_{k}\ge0$ & McCormick variable for bus in-vehicle time \\
+$\zeta^{\text{f-WT}}_{k}\ge0$ & McCormick variable for bus waiting time \\
+$\alpha_{a,r}\ge0$ & Beckmann dual-cut weights (sum to 1 for each $a$) \\
+$\beta_{k,j}\ge0$ & Path-entropy dual-cut weights (sum to $1/\theta$) \\
+$\eta_{odh,j}^m\ge0$ & Mode-entropy dual-cut weights (sum to $1/\mu$) \\
+\hline
+\end{tabularx}
+
+\subsection*{Derived Quantities}
+\begin{tabularx}{\textwidth}{@{} l X @{}}
+\hline
+符号 & 说明 \\
+\hline
+$t_a(v)$ & BPR link travel time $t_a^0\big[1+\alpha(v/C_a)^\beta\big]$ \\
+$\text{TT}_k$ & In-vehicle time for bus path $k$ \\
+$\text{WT}_k$ & Waiting time under chosen headway \\
+$\hat{t}_k$ & Path travel time expression for auto paths (sum over links) \\
+\hline
+\end{tabularx}
+
+\section{Problem Structure}
+
+\subsection{Upper Level (Leader): Route Authority}
+
+The transit authority chooses which routes to operate and at what frequency to \textbf{minimize total system cost}.
+
+\textbf{Decision Variables:}
+\begin{equation}
+x_r \in \{0, 1\}, \quad w_{rk} \in \{0, 1\}, \quad n_r \in \mathbb{Z}^+ 
+\end{equation}
+
+where $x_r$ indicates route activation, $w_{rk}$ selects frequency class $k$ for route $r$, and $n_r$ is the number of buses allocated to route $r$.
+
+\textbf{Objective:}
+\begin{equation}
+\min_{x,w,n} Z_{\text{upper}} = Z_{\text{op}}(x,n) + Z_{\text{user}}(x,w,n,q^*) + Z_{\text{bg}}(v^*)
+\end{equation}
+
+where $q^*$ and $v^*$ are optimal user responses to decisions $(x,w,n)$.
+
+\textbf{Critical Insight:} The operator now makes two independent decisions:
+\begin{enumerate}
+    \item \textbf{Route Design:} $x_r$ (activate/deactivate) and $w_{rk}$ (select frequency)
+    \item \textbf{Fleet Allocation:} $n_r$ (allocate discrete number of buses)
+\end{enumerate}
+
+The objective function depends on $n_r$ (fleet size), \emph{not} on $w_{rk}$ (frequency selection). This reflects the operational reality that bus procurement costs are determined by vehicle numbers, not scheduling frequency.
+
+\subsection{Lower Level (Follower): User Behavior}
+
+Given operator decisions $(x,w)$, users choose routes and modes. The formulation distinguishes \emph{fixed-demand} from \emph{elastic-demand} modes:
+
+\begin{itemize}
+    \item \textbf{Fixed-Demand Modes} ($\mathcal{M}_{Fixed} = \{Auto\}$): Demand is exogenously fixed at $\bar{D}_w^{Auto}$. Only performs SUE (logit) path choice. Flows contribute to congestion via PCE factor $\eta_{Auto}/O_{Auto}$.
+    
+    \item \textbf{Elastic-Demand Modes} ($\mathcal{M}_{Choice} = \{Bus, RH, Metro, Other\}$): Demand is endogenously allocated from a shared pool $D_w^{Total} - \bar{D}_w^{Auto}$ via MNL mode choice. Each mode performs its own SUE or fixed-path routing:
+    \begin{itemize}
+        \item \textbf{Bus:} SUE path choice (user logit over activated routes).
+        \item \textbf{RH:} SUE path choice; pickup wait time $WT_{pickup}^{RH}$ is a variable (depends on congestion).
+        \item \textbf{Metro:} \emph{Fixed-path routing} (single route, no SUE). Demand follows standard MNL mode choice.
+        \item \textbf{Other:} Fixed utilities $\Psi_w^{Other}$; no path choice.
+    \end{itemize}
+    Road-based modes (Bus, RH) contribute to congestion via occupancy/PCE factors.
+\end{itemize}
+
+\paragraph{Evacuation / mode-lock option (drivers must also drive back).} Split demand into two segments: $h^{\text{drv}}$ with feasible modes $M_{h^{\text{drv}}}=\{D\}$, and $h^{\text{non-drv}}$ with $M_{h^{\text{non-drv}}}=\{B,R,W,O,\dots\}$ (exclude $D$). The D flows from $h^{\text{drv}}$ still feed congestion: $v_{a,D}$ is computed from their path flows and summed into $v_a=\sum_m v_{a,m}$ for BPR/Beckmann. Implementation impact is data/parameter-level only: split $D_{odh}$ by segment and set $M_h$ accordingly; no other constraints or duality equations need changes.
+
+\textit{Practical effect:} (i) 驾车段不参加 MNL（只有一个模式$D$，模式熵项为 0），但仍做路径logit/SUE；其路径流进入$v_{a,D}$ 产生拥堵；(ii) 非驾车段照常做SUE+MNL，在其可行模式集中分配；(iii) 代码层面仅需在数据参数里拆需求、设置$M_h$。
+
+\subsection{Key Modeling Innovation}
+
+The formulation achieves a critical distinction:
+\begin{itemize}
+    \item \textbf{Auto users:} Experience route choice as in standard SUE (MNL path choice among all candidates)
+    \item \textbf{Bus users:} Experience route choice only among \emph{operator-activated routes}, coupling upper-level design with lower-level equilibrium
+    \item \textbf{Exogenous modes (R/W/O):} No path choice; they enter mode choice with fixed utilities built from exogenous time/cost inputs
+\end{itemize}
+
+Both are unified under the same mathematical framework (SUE+MNL via entropy regularization), but bus path availability is explicitly controlled by binary decisions $x_r$, creating the essential bi-level structure.
+
+\section{Upper Level Objective: Total System Cost (Social Cost Perspective)}
+
+The upper-level objective minimizes the \textbf{total social cost}, comprising only genuine resource consumption and not internal redistributions (private payments). We minimize:
+
+\begin{equation}
+Z_{\text{upper}} = Z_{\text{sys-op}} + Z_{\text{user}} + Z_{\text{bg}}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $Z_{\text{sys-op}}$: \textbf{Operator costs} --- bus procurement, fuel, maintenance; real resource consumption
+    \item $Z_{\text{user}}$: \textbf{User time costs only} --- travel time converted to monetary units via VOT; excludes fares and private operating costs
+    \item $Z_{\text{bg}}$: \textbf{Background traffic costs} --- exogenous traffic's time costs; real resource consumption
+\end{itemize}
+
+\textbf{Excluded:} User-paid fares, tolls, and fuel/operating costs are internal transfers (user to operator/seller) and do not represent resources consumed by society. They are included in mode choice utilities (lower level) to reflect user preferences, but excluded from the system objective (upper level) which measures only social welfare.
+
+\subsection{Component 1: System Operator Cost $Z_{\text{sys-op}}$}
+
+The operator (transit authority) incurs costs from operating bus routes and environmental/operational costs from private vehicle usage.
+
+\subsubsection{Bus Operating Costs}
+
+\begin{equation}
+Z_{\text{sys-op}}^{\text{bus}} = \sum_{r \in R} \text{FC}_r \cdot x_r + \sum_{r \in R} C_{\text{fleet}} \cdot n_r
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $\text{FC}_r$ is the fixed cost for activating route $r$ (e.g., driver depot allocation, route supervision)
+    \item $C_{\text{fleet}}$ is the per-vehicle cost (e.g., bus purchase, maintenance, insurance per year)
+    \item $n_r$ is the number of buses allocated to route $r$ (integer decision variable)
+\end{itemize}
+
+\textbf{Key Change:} Operating cost now depends on \emph{fleet size} ($n_r$), not \emph{frequency selection} ($w_{rk}$). This aligns with real transit operations where:
+\begin{enumerate}
+    \item Purchasing buses is a capital/maintenance expense (proportional to $n_r$)
+    \item Scheduling frequency ($w_{rk}$) affects service quality but not directly the vehicle procurement cost
+    \item The constraint $n_r \times C_B \geq$ (total demand on route $r$) and \\$n_r \times \bar{H}_j \geq T_r \times w_{rj}$ ensures fleet is sufficient for chosen frequency and capacity
+\end{enumerate}
+
+\subsubsection{Auto Operational/Environmental Costs (Linearized)}
+
+Using McCormick auxiliary variables $\zeta^{\text{f-time}}_{k}$ to linearize the product of flow and travel time:
+
+\begin{equation}
+Z_{\text{sys-op}}^{\text{auto}} = \sum_{m \in \{D,X\}} \sum_{w \in W} \sum_{k \in K_w^m} \hat{C}_{m}^{\text{op-env}} \cdot \zeta^{\text{f-time}}_{k}
+\end{equation}
+
+where $\zeta^{\text{f-time}}_{k}$ approximates $f_k \cdot t_k$ (path flow times travel time). 
+
+\textbf{Important Note on Flow Variables:} The path flow variable $f_k$ represents the \emph{total flow} on path $k$ aggregated across all user segments $h \in H$. Therefore, $\zeta_k = f_k \times t_k$ already captures the full flow-weighted travel time, and we do \textbf{not} multiply by the external demand parameter $D_w^h$ (which would cause double-counting since $f_k$ is itself an endogenous flow variable determined by the SUE equilibrium).
+
+\subsection{Component 2: User Time Cost $Z_{\text{user}}$ (Linearized, Time Only)}
+
+\textbf{Revised Definition:} User costs in the system objective include only \textbf{time costs} (converted to monetary units via VOT), not private monetary payments (fares, operating costs), which are internal transfers within the system and not social costs.
+
+\begin{align}
+Z_{\text{user}} = & \sum_{w \in W} \Bigg[ \\
+& \underbrace{\overline{\text{VOT}}_w \sum_{k \in K_w^{D} \cup K_w^{X}} \zeta^{\text{f-time}}_{k}}_{\text{Auto Time Cost}} \nonumber \\
+& + \underbrace{\overline{\text{VOT}}_w \sum_{k \in K_w^{B}} \left(\zeta^{\text{f-TT}}_{k} + \zeta^{\text{f-WT}}_{k}\right)}_{\text{Bus Time Cost (Linearized)}} \nonumber \\
+& + \underbrace{\overline{\text{VOT}}_w \sum_{k \in K_w^{RH}} \left(\zeta^{\text{f-TT}}_{k} + \zeta^{\text{f-WT}}_{k}\right)}_{\text{RH Time Cost (Linearized)}} \Bigg]
+\end{align}
+
+where:
+\begin{itemize}
+    \item $\overline{\text{VOT}}_w = \sum_{h \in H} \omega_{wh} \cdot \text{VOT}_h$ is the segment-weighted value of time for OD pair $w$
+    \item $\omega_{wh} = D_w^h / \sum_{h' \in H} D_w^{h'}$ is the demand-share weight for segment $h$ on OD pair $w$
+    \item $\zeta^{\text{f-time}}_{k}$: Linearizes $f_k \times \text{(travel time)}$ for auto modes
+    \item $\zeta^{\text{f-TT}}_{k}$: Linearizes $f_k \times \text{(in-vehicle time)}$ for bus and RH
+    \item $\zeta^{\text{f-WT}}_{k}$: Linearizes $f_k \times \text{(waiting time)}$ for bus and RH
+\end{itemize}
+
+
+
+
+
+
+
+\subsection{Component 3: Background Traffic Cost $Z_{\text{bg}}$ (Time Costs Only)}
+
+Background traffic cost captures the impact of exogenous traffic on system congestion, including only time costs (time spent by background traffic, converted via VOT):
+
+\begin{equation}
+Z_{\text{bg}} = \sum_{a \in A} \bar{v}_a \cdot \tilde{t}_a \cdot \text{VOT}_{\text{bg}}
+\end{equation}
+
+with supporting hyperplanes for $t_a(v_a) = t_a^0 \big[1 + \alpha (v_a/C_a)^\beta \big]$:
+
+\begin{equation}
+\tilde{t}_a \geq t_a(v_a^r) + t'_a(v_a^r)\,(v_a - v_a^r), \quad v_a^r = \phi_r C_a, \; \alpha=0.15,\; \beta=4.
+\end{equation}
+
+This ensures the upper-level background cost aligns with the lower-level congestion representation.
+
+\subsection{Summary: Linearization and McCormick Technique}
+
+\textbf{Key Design Principle:} To maintain MILP structure (required by Gurobi), all nonlinear terms in the upper-level objective are linearized:
+
+\begin{itemize}
+    \item \textbf{Congestion effects} use piecewise-linear approximations: Beckmann integral in the lower level and BPR travel time in the upper-level $Z_{\text{bg}}$ with the same breakpoints
+    \item \textbf{Upper-level objective} uses linear/McCormick approximations for bilinear products
+    \item \textbf{Bilinear products} $f_k \times t_k$ are replaced by McCormick variables $\zeta$ with linearization constraints
+\end{itemize}
+
+\subsection{McCormick Linearization Constraints}
+
+To handle bilinear terms $f_k \times t_k$ in the objective function, we introduce McCormick auxiliary variables and corresponding linearization constraints.
+
+\subsubsection{Auxiliary Variables}
+
+Define three types of McCormick auxiliary variables:
+
+\begin{itemize}
+    \item $\zeta^{\text{f-time}}_{k}$: Linearizes $f_k \times t_k$ for auto modes ($m \in \{D, X\}$)
+    \item $\zeta^{\text{f-TT}}_{k}$: Linearizes $f_k \times \text{TT}_k$ (in-vehicle time) for bus mode ($m = B$)
+    \item $\zeta^{\text{f-WT}}_{k}$: Linearizes $f_k \times \text{WT}_k$ (waiting time) for bus mode ($m = B$)
+\end{itemize}
+
+\subsubsection{Constraint Formulations}
+
+For each path $k$, we apply the standard McCormick envelope linearization with four inequalities per bilinear product. Let $f_k \in [f_L, f_U]$ and $t_k \in [t_L, t_U]$ denote the bounds on flow and time variables.
+
+\textbf{(1) Auto Mode Travel Time Constraints:}
+
+For $k \in K_w^D \cup K_w^X$ (drive-alone or taxi paths), we linearize $f_k \times t_k$ using auxiliary variable $\zeta^{\text{f-time}}_{k}$ with:
+
+\begin{align}
+\zeta^{\text{f-time}}_{k} &\geq t_{k,L} \cdot f_k \quad && \forall k \in K^{\text{auto}} \label{eq:mc_auto_1} \\
+\zeta^{\text{f-time}}_{k} &\geq t_k + t_{k,U} \cdot (f_k - f_{k,U}) \quad && \forall k \in K^{\text{auto}} \label{eq:mc_auto_2} \\
+\zeta^{\text{f-time}}_{k} &\leq t_{k,U} \cdot f_k \quad && \forall k \in K^{\text{auto}} \label{eq:mc_auto_3} \\
+\zeta^{\text{f-time}}_{k} &\leq t_k + t_{k,L} \cdot (f_k - f_{k,U}) \quad && \forall k \in K^{\text{auto}} \label{eq:mc_auto_4}
+\end{align}
+
+where:
+\begin{itemize}
+    \item $t_k^0 = \sum_{a \in p_k} t_a^0$ is the free-flow travel time (used as $t_{k,L}$)
+    \item $t_{k,U}$ is the upper bound on travel time (free-flow time + maximum congestion delay)
+    \item $f_{k,L} = 0$ (flow non-negativity)
+    \item $f_{k,U} = \sum_{w,h} D_w^h$ (maximum possible flow bounded by total demand)
+\end{itemize}
+
+\textbf{(2) Bus In-Vehicle Time Constraints:}
+
+For $k \in K_w^B$ (bus paths), we linearize $f_k \times \text{TT}_k$ using auxiliary variable $\zeta^{\text{f-TT}}_{k}$ with:
+
+\begin{align}
+\zeta^{\text{f-TT}}_{k} &\geq \text{TT}_{k,L} \cdot f_k && \forall k \in K^B \label{eq:mc_tt_1} \\
+\zeta^{\text{f-TT}}_{k} &\geq \text{TT}_k + \text{TT}_{k,U} \cdot (f_k - f_{k,U}) && \forall k \in K^B \label{eq:mc_tt_2} \\
+\zeta^{\text{f-TT}}_{k} &\leq \text{TT}_{k,U} \cdot f_k && \forall k \in K^B \label{eq:mc_tt_3} \\
+\zeta^{\text{f-TT}}_{k} &\leq \text{TT}_k + \text{TT}_{k,L} \cdot (f_k - f_{k,U}) && \forall k \in K^B \label{eq:mc_tt_4}
+\end{align}
+
+where $\text{TT}_k^0$ is the free-flow in-vehicle time on bus path $k$ (used as $\text{TT}_{k,L}$), and $\text{TT}_{k,U}$ includes congestion.
+
+\textbf{(3) Bus Waiting Time Constraints:}
+
+For $k \in K_w^B$ (bus paths), we linearize $f_k \times \text{WT}_k$ using auxiliary variable $\zeta^{\text{f-WT}}_{k}$ with:
+
+\begin{align}
+\zeta^{\text{f-WT}}_{k} &\geq 0 && \forall k \in K^B \label{eq:mc_wt_1} \\
+\zeta^{\text{f-WT}}_{k} &\geq \text{WT}_k + \text{WT}_{k,U} \cdot (f_k - f_{k,U}) && \forall k \in K^B \label{eq:mc_wt_2} \\
+\zeta^{\text{f-WT}}_{k} &\leq \text{WT}_{k,U} \cdot f_k && \forall k \in K^B \label{eq:mc_wt_3} \\
+\zeta^{\text{f-WT}}_{k} &\leq \text{WT}_k && \forall k \in K^B \label{eq:mc_wt_4}
+\end{align}
+
+where:
+\begin{itemize}
+    \item $\text{WT}_k = 0.5 \times \sum_{j \in J_{r(k)}} H_j \cdot w_{r(k),j}$ is the average waiting time
+    \item $r(k)$ is the route corresponding to path $k$
+    \item $H_j$ is the headway for frequency option $j$
+    \item $w_{r,j} \in \{0,1\}$ is the binary frequency selection variable
+    \item $\text{WT}_{k,L} = 0$ (minimum waiting time when highest frequency is selected)
+    \item $\text{WT}_{k,U} = 0.5 \times \max_j H_j$ (maximum average waiting time)
+\end{itemize}
+
+\subsubsection{Linearization Strategy and Envelope Tightness}
+
+\textbf{McCormick Envelope:} The four-inequality system forms a tight linear relaxation (convex hull) of the bilinear region $\{(f, t, \zeta) : \zeta = f \cdot t, f \in [f_L, f_U], t \in [t_L, t_U]\}$. This is the tightest possible linear approximation.
+
+\textbf{Handling Congestion:} To avoid introducing quadratic terms $f_k \times v_a$ (which would violate MILP structure), the time variable $t_k$ in the McCormick constraints is treated as:
+\begin{itemize}
+    \item \textbf{Lower bound} $t_{k,L}$: Free-flow time $t_k^0$ (constant, independent of congestion)
+    \item \textbf{Upper bound} $t_{k,U}$: Free-flow time plus maximum expected congestion delay
+    \item \textbf{Actual value} $t_k$: Can vary between bounds (as a function of link flows from lower level)
+\end{itemize}
+
+\textbf{Implementation Detail:} Since $t_k$ is not an explicit decision variable (it depends implicitly on link flows $v_a$ through the lower-level problem), we use a \textit{conservative outer approximation} in constraints (2) and (4):
+
+\begin{itemize}
+    \item In constraint (2): Replace $t_k$ with its lower bound $t_{k,L}$, giving:
+    \begin{equation}
+    \zeta^{\text{f-time}}_{k} \geq f_{k,U} \cdot t_{k,L} + t_{k,U} \cdot f_k - f_{k,U} \cdot t_{k,U}
+    \end{equation}
+    
+    \item In constraint (4): Replace $t_k$ with its upper bound $t_{k,U}$, giving:
+    \begin{equation}
+    \zeta^{\text{f-time}}_{k} \leq f_{k,U} \cdot t_{k,U} + t_{k,L} \cdot f_k - f_{k,U} \cdot t_{k,L}
+    \end{equation}
+\end{itemize}
+
+This creates a valid (though slightly looser) outer approximation that maintains MILP linearity while capturing the essential bounds.
+
+The full congestion effects are captured exactly in the lower-level problem through:
+\begin{itemize}
+    \item The Beckmann integral term: $\sum_{a \in A} \int_0^{v_a} t_a(\xi) d\xi$
+    \item Piecewise linear approximation: $\tau_a \geq t_a(v_a^r)(v_a - v_a^r) + B_a(v_a^r)$ for multiple breakpoints $r$
+\end{itemize}
+
+This design ensures:
+\begin{enumerate}
+    \item The upper-level objective remains linear (required for MILP)
+    \item Congestion effects are exactly modeled in the lower-level equilibrium
+    \item The McCormick envelope provides valid (conservative) bounds on flow-time products
+    \item The strong duality equality links upper and lower levels, ensuring consistency
+\end{enumerate}
+
+\subsubsection{Variable Bounds}
+
+All McCormick auxiliary variables are non-negative:
+
+\begin{equation}
+\zeta^{\text{f-time}}_{k}, \zeta^{\text{f-TT}}_{k}, \zeta^{\text{f-WT}}_{k} \geq 0, \quad \forall k
+\end{equation}
+
+Upper bounds are implicitly determined by:
+\begin{itemize}
+    \item Flow bounds: $f_k \leq \sum_{w,m} D_w$ (total demand)
+    \item Time bounds: $t_k^0$ are fixed constants from network data
+    \item Headway bounds: $\sum_{j} H_j \cdot w_{r,j} \leq \max_j H_j$ (largest headway option)
+\end{itemize}
+
+\textbf{Decision Flow:}
+\begin{enumerate}
+    \item Operator simultaneously chooses:
+    \begin{itemize}
+        \item Routes to activate: $x_r \in \{0,1\}$
+        \item Service frequency for each route: $w_{rk} \in \{0,1\}$ (selects 1 of $|J_r|$ frequency options)
+        \item Fleet allocation: $n_r \in \mathbb{Z}^+$ (number of buses for each route)
+    \end{itemize}
+    \item Fleet decisions must satisfy:
+    \begin{itemize}
+        \item \emph{Capacity constraint:} $n_r \times C_B \geq$ total passenger demand on route $r$
+        \item \emph{Activation constraint:} $n_r \leq n_{\max} \times x_r$ (cannot deploy buses to inactive routes)
+    \end{itemize}
+    \item Users respond via lower-level equilibrium, determining $q_w^m, f_k^{w,m}, v_a$
+    \item Link flows $v_a$ determine congestion (captured in lower level via Beckmann, approximated linearly in upper objective)
+    \item All three cost components depend on both operator decisions and user responses
+    \item Optimizer seeks the $(x,w,n)$ that minimizes total system cost: $\min Z_{\text{op}}(x,n) + Z_{\text{user}}(x,w,n) + Z_{\text{bg}}(v)$
+\end{enumerate}
+
+\subsection{Lower Level (Follower): User Behavior}
+
+Given operator decisions $(x,w)$, users choose routes and modes via a convex optimization problem that simultaneously achieves:
+\begin{enumerate}
+    \item \textbf{Stochastic User Equilibrium (SUE)} for route choice
+    \item \textbf{Multinomial Logit (MNL)} for mode choice
+\end{enumerate}
+
+The lower level is formulated as a convex optimization problem, and its KKT conditions are mathematically equivalent to SUE+MNL.
+
+\section{Lower Level Problem: User Equilibrium with Heterogeneous Demand}
+
+\subsection{Section 1: Model Assumptions \& Physical Definitions}
+
+To satisfy the specific rules regarding captive drivers, vehicle capacities, and PCE factors, we explicitly define the physical variables.
+
+\subsubsection{1.1 Classification of Modes}
+
+We divide the set of modes $M$ into two subsets:
+\begin{itemize}
+    \item $\mathcal{M}_{Fixed} = \{ \text{Auto} \}$: \textbf{Captive Users}. Drivers arrive and leave as drivers. They contribute to congestion and choose routes (SUE) but \textbf{do not} participate in mode splitting (No MNL).
+    \item $\mathcal{M}_{Choice} = \{ \text{Bus, RH, Metro, Other} \}$: \textbf{Choice Users}. These users participate in the MNL allocation based on utility and can choose among multiple paths within each mode (SUE).
+        \begin{itemize}
+            \item \textbf{Bus}: Multiple routes with different transfers, waiting times
+            \item \textbf{Ride-hailing (RH)}: Different routing strategies (fast/cheap/scenic)
+            \item \textbf{Metro}: Multiple line combinations (e.g., direct line vs. transfer via hub)
+            \item \textbf{Other}: Walking, biking, or other exogenous alternatives
+        \end{itemize}
+\end{itemize}
+
+\textbf{Key insight:} All choice modes support path choice via SUE. Even Metro, which operates on fixed schedules independent of road congestion, can have multiple viable line combinations between an OD pair.
+
+\subsubsection{1.2 Vehicle Capacity and PCE (Rules 2 \& 3)}
+
+Let $f_k^{w,m}$ be the \textbf{Passenger Flow} (pax/hr). Congestion is driven by \textbf{Vehicle Flow} in PCE units.
+\begin{itemize}
+    \item $O_m$: Average Occupancy (pax/veh). (e.g., $O_{Auto} \approx 1.2, O_{Bus} \approx 50$).
+    \item $\eta_m$: PCE Factor. (e.g., $\eta_{Auto}=1.0, \eta_{Bus}=2.5, \eta_{RH}=1.0$).
+\end{itemize}
+
+\textbf{Effective Link Volume ($v_a$):}
+The total congestion volume on link $a$ is the sum of all road-based modes, converted to PCEs:
+\begin{equation} \label{eq:volume}
+    v_a = \sum_{w} \sum_{k: a \in k} \left( \underbrace{f_k^{w,Auto} \frac{\eta_{Auto}}{O_{Auto}}}_{\text{Auto Load}} + \underbrace{f_k^{w,RH} \frac{\eta_{RH}}{O_{RH}}}_{\text{RH Load}} + \underbrace{f_k^{w,Bus} \frac{\eta_{Bus}}{O_{Bus}}}_{\text{Bus Load}} \right)
+\end{equation}
+\textit{Note: Metro and 'Other' (assuming walking/bike) do not contribute to $v_a$ in the BPR function.}
+
+\subsection{Section 2: Explicit Utility Function Forms (No Black Box)}
+
+\textbf{Key Convention:} We decompose path utility into two parts:
+\begin{itemize}
+    \item $\Psi_k^m$: \textbf{Fixed utility} (non-congestion components: ASC, monetary costs, wait times, etc.)
+    \item \textbf{Congestion term}: $\beta_{time} \cdot \frac{\eta_m}{O_m} \sum_{a \in k} t_a(v_a)$ (link travel times weighted by PCE/occupancy)
+    \item \textbf{Total path utility}: $V_k^m = \Psi_k^m + \beta_{time} \cdot \frac{\eta_m}{O_m} \sum_{a \in k} t_a(v_a)$
+\end{itemize}
+
+This decomposition ensures that the Beckmann integral in the objective function captures all congestion effects consistently.
+
+\subsubsection{2.1 Auto (Rule 1: SUE Only)}
+\textbf{Fixed utility:}
+\begin{equation}
+    \Psi_k^{Auto} = \beta_{ASC}^{Auto} + \beta_{cost} \cdot (\text{Fuel} + \text{Toll}_k)
+\end{equation}
+
+\textbf{Complete path utility (including congestion):}
+\begin{equation}
+    V_k^{Auto} = \Psi_k^{Auto} + \beta_{time} \cdot \frac{\eta_{Auto}}{O_{Auto}} \sum_{a \in k} t_a(v_a)
+\end{equation}
+
+\subsubsection{2.2 Ride-hailing (Rule 4: SUE + MNL + Congestion)}
+\textbf{Fixed utility:}
+\begin{equation}
+    \Psi_k^{RH} = \beta_{ASC}^{RH} + \beta_{wait} \cdot WT_{pickup} + \beta_{cost} \cdot (\text{Base} + \rho_t \bar{t}_k + \rho_d d_k)
+\end{equation}
+
+\textbf{Complete path utility:}
+\begin{equation}
+    V_k^{RH} = \Psi_k^{RH} + \beta_{time} \cdot \frac{\eta_{RH}}{O_{RH}} \sum_{a \in k} t_a(v_a)
+\end{equation}
+
+\subsubsection{2.3 Bus Transit (Rule 5: SUE + MNL + PCE Impact)}
+\textbf{Fixed utility:}
+\begin{equation}
+    \Psi_k^{Bus} = \beta_{ASC}^{Bus} + \beta_{wait} \cdot \frac{\text{Headway}}{2} + \beta_{walk} \cdot \text{Walk}_k + \beta_{cost} \cdot \text{Fare}_{Bus}
+\end{equation}
+
+\textbf{Complete path utility:}
+\begin{equation}
+    V_k^{Bus} = \Psi_k^{Bus} + \beta_{time} \cdot \frac{\eta_{Bus}}{O_{Bus}} \sum_{a \in k} t_a(v_a)
+\end{equation}
+
+\subsubsection{2.4 Metro \& Others (Path Choice + MNL)}
+
+\textbf{Metro with multiple lines:}
+
+Metro can have multiple path options (e.g., Line 1→2 vs. Line 3→4, express vs. local). For each path:
+
+\textbf{Fixed utility:}
+\begin{equation}
+\begin{aligned}
+    \Psi_k^{Metro} &= \beta_{ASC}^{Metro} + \beta_{time} \cdot T_k^{fixed} \\
+    &\quad + \beta_{wait} \cdot WT_k + \beta_{cost} \cdot \text{Fare}_k
+\end{aligned}
+\end{equation}
+
+where $T_k^{fixed}$ is the scheduled travel time (not affected by road congestion), $WT_k$ is the waiting time (function of frequency), and $\text{Fare}_k$ may vary by distance or line type.
+
+\textbf{Complete path utility:}
+\begin{equation}
+    V_k^{Metro} = \Psi_k^{Metro}
+\end{equation}
+
+\textbf{Note:} Metro does not contribute to road congestion, so there is no additional $\beta_{time} \cdot \sum_a t_a(v_a)$ term. All travel time is pre-determined by schedule.
+
+\textbf{Special case - Single dominant path:} If a particular OD pair has only one viable metro route ($|K_w^{Metro}| = 1$), the model automatically simplifies but uses the same formulation.
+
+\subsubsection{2.5 Behavioral Consistency and Parameter Calibration}
+
+A critical distinction exists between the \textit{marginal system cost} derived from the optimization objective and the \textit{perceived private cost} determining user behavior.
+
+In the mathematical derivation (Section 4.1), the derivative of the congestion term with respect to passenger flow $f_k^{w,m}$ yields:
+\begin{equation}
+    \frac{\partial Z}{\partial f_k^{w,m}} \propto \beta_{time} \cdot \left( \frac{\eta_m}{O_m} \right) \cdot t_a(v_a)
+\end{equation}
+Mathematically, this implies that the optimization model "rewards" high-occupancy modes (like Bus) by scaling down their congestion disutility by the factor $\frac{\eta_m}{O_m}$ (representing the low marginal contribution of a single passenger to system congestion).
+
+However, in reality, users are "selfish" and perceive the full travel time $t_a(v_a)$, regardless of their marginal impact on the system. To reconcile the single-objective optimization framework with realistic user behavior, we apply a \textbf{parameter calibration} strategy in the numerical implementation.
+
+We define the \textit{input} time coefficient $\hat{\beta}_{time}^m$ for the optimization model as the empirically estimated value $\beta_{real}$ scaled by the inverse of the efficiency factor:
+\begin{equation} \label{eq:param_calibration}
+    \hat{\beta}_{time}^m = \beta_{real} \cdot \left( \frac{O_m}{\eta_m} \right)
+\end{equation}
+
+By substituting this calibrated parameter into the KKT conditions:
+\begin{align}
+    \text{Perceived Disutility} &= \underbrace{\left[ \beta_{real} \cdot \frac{O_m}{\eta_m} \right]}_{\text{Calibrated Parameter}} \cdot \underbrace{\left[ \frac{\eta_m}{O_m} \cdot t_a(v_a) \right]}_{\text{Marginal System Factor}} \nonumber \\
+    &= \beta_{real} \cdot t_a(v_a)
+\end{align}
+
+
+\subsection{Section 3: Mathematical Formulation (The Minimization Problem)}
+
+We propose the following convex minimization program. This is the "lower-level" problem that generates the desired equilibrium.
+
+\subsubsection{3.1 Objective Function}
+
+\textbf{Crucial Observations:}
+\begin{enumerate}
+    \item \textbf{No entropy term for $q_w^{Auto}$}: This ensures Auto demand is treated as fixed.
+    \item \textbf{Beckmann integral captures all congestion}: The term $\sum_a \int_0^{v_a} (-\beta_{time}) t_a(x) dx$ includes congestion effects for all road-based modes (Auto, Bus, RH). This is why $\Psi_k^m$ in the second term contains only fixed utilities (ASC, costs, wait times) and NOT congestion-dependent travel times.
+\end{enumerate}
+
+\begin{equation} \label{eq:objective}
+\begin{aligned}
+    \min_{f, q} Z = & \underbrace{\sum_{a \in A} \int_0^{v_a} (-\beta_{time}) t_a(x) \, dx}_{\text{Global Congestion (All road modes via PCE)}} \\
+    & + \underbrace{\sum_{w,m,k} f_k^{w,m} (-\Psi_k^m)}_{\text{Fixed Utility (ASC + costs + non-congestion times)}} \\
+    & + \underbrace{\frac{1}{\theta} \sum_{w} \sum_{k} f_k^{w,Auto} (\ln f_k^{w,Auto} - 1)}_{\text{Auto Route Entropy (Rule 1: SUE)}} \\
+    & + \underbrace{\frac{1}{\theta} \sum_{w, m \in \mathcal{M}_{Choice}} \sum_{k} f_k^{w,m} (\ln f_k^{w,m} - 1)}_{\text{Choice Modes Route Entropy (Rules 4,5: SUE)}} \\
+    & + \underbrace{\frac{1}{\mu} \sum_{w} \sum_{m \in \mathcal{M}_{Choice}} q_w^m (\ln q_w^m - 1)}_{\text{Choice Modes Entropy (Rules 4,5: MNL)}}
+\end{aligned}
+\end{equation}
+
+\subsubsection{3.2 Constraints}
+
+1. \textbf{Fixed Demand Conservation (Auto - Rule 1):}
+\begin{equation} \label{eq:cons_auto}
+    \sum_{k \in K_w^{Auto}} f_k^{w,Auto} = \bar{D}_w^{Auto}, \quad \forall w \quad (\text{Dual: } \lambda_w^{Auto})
+\end{equation}
+Here, $\bar{D}_w^{Auto}$ is the exogenous, fixed volume of "Drive-in/Drive-out" users.
+
+2. \textbf{Elastic Flow Conservation (Choice Modes):}
+\begin{equation} \label{eq:cons_flow_choice}
+\begin{aligned}
+    \sum_{k \in K_w^m} f_k^{w,m} &= q_w^m, \quad \forall w, m \in \mathcal{M}_{Choice} \\
+    &\quad (\text{Dual: } \lambda_w^m)
+\end{aligned}
+\end{equation}
+
+3. \textbf{Elastic Demand Conservation (MNL Pool):}
+The total demand for choice modes is the remaining pool.
+\begin{equation} \label{eq:cons_demand_choice}
+\begin{aligned}
+    \sum_{m \in \mathcal{M}_{Choice}} q_w^m &= D_w^{Total} - \bar{D}_w^{Auto}, \quad \forall w \\
+    &\quad (\text{Dual: } \gamma_w)
+\end{aligned}
+\end{equation}
+
+4. \textbf{Link Flow Definition (with PCE Conversion):}
+\begin{equation} \label{eq:link_flow}
+\begin{aligned}
+    v_a &= \sum_{w,m,k} f_k^{w,m} \cdot \delta_{ak}^{w,m} \cdot \frac{\eta_m}{O_m}, \quad \forall a \in A \\
+    &\quad (\text{Dual: } \rho_a)
+\end{aligned}
+\end{equation}
+where $\delta_{ak}^{w,m} = 1$ if link $a$ is on path $k$ of OD $w$, mode $m$; else 0.
+
+
+
+\subsubsection{Component (1): Unified Congestion Cost via Beckmann Integral}
+
+\begin{equation}
+\sum_{a \in A} \int_0^{v_a} (-\beta_{time}) t_a(\xi) d\xi
+\end{equation}
+
+All road-based modes (Auto, Bus, RH) contribute to link flows via their path flows, converted to PCE/vehicle units using occupancy and PCE factors:
+
+\begin{equation}
+v_a = \sum_{w,m \in \{Auto,Bus,RH\}} \sum_{k} f_k^{w,m} \cdot \frac{\eta_m}{O_m} + \bar{v}_a
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $f_k^{w,m}$ is passenger flow (pax)
+    \item $\eta_m$ is the PCE factor for mode $m$ (e.g., $\eta_{Auto} = 1.0$ PCE per passenger; $\eta_{RH} = 1.2$ for worse handling)
+    \item $O_m$ is occupancy (pax per vehicle), so $\eta_m/O_m$ converts pax to PCE units
+    \item $t_a(v_a)$ is BPR travel time as a function of total link flow
+    \item Marginal utility of time: $-\beta_{time} < 0$ (constant across all modes for consistency in congestion modeling)
+\end{itemize}
+
+This unified treatment ensures:
+\begin{itemize}
+    \item \textbf{Accuracy:} Link flows properly account for vehicle types (auto vs. multi-passenger vehicles)
+    \item \textbf{Strict convexity:} Single Beckmann integral remains strictly convex
+    \item \textbf{Simplicity:} All modes share a common congestion model
+\end{itemize}
+
+\subsubsection{Component (2): SUE Entropy for Route Choice}
+
+\begin{equation}
+\frac{1}{\theta} \sum_{w,m,k} f_k^{w,m} (\ln f_k^{w,m} - 1)
+\end{equation}
+
+The parameter $\theta$ is the SUE dispersion parameter. This entropy term induces logit-based path choice, recovering SUE from KKT conditions.
+
+\subsubsection{Component (3): MNL Entropy for Mode Choice}
+
+\begin{equation}
+\frac{1}{\mu} \sum_{w,m} q_w^m (\ln q_w^m - 1)
+\end{equation}
+
+The parameter $\mu$ is the MNL scale parameter. This entropy term induces logit-based mode choice, recovering MNL from KKT conditions.
+
+\subsubsection{Component (4): Fixed Utility Component}
+
+\begin{equation}
+-\sum_{w,m} q_w^m \Psi_w^m
+\end{equation}
+
+where $\Psi_w^m$ is the fixed (non-time) utility of mode $m$, e.g., mode-specific constants, comfort attributes, etc.
+
+\subsection{Constraints}
+
+\subsubsection{Fixed-Demand Constraint (Auto Mode)}
+
+\begin{equation}\label{eq:fixed_auto_demand}
+\sum_{k \in K_w^{Auto}} f_k^{w,Auto} = \bar{D}_w^{Auto}, \quad \forall w \in W
+\end{equation}
+
+Auto demand is exogenously fixed. This flow contributes to congestion via PCE factor $\eta_{Auto}/O_{Auto}$.
+
+\subsubsection{Elastic-Demand Constraint (Choice Modes)}
+
+\begin{equation}\label{eq:elastic_demand_conservation}
+\sum_{m \in \mathcal{M}_{Choice}} q_w^m = D_w^{Total} - \bar{D}_w^{Auto}, \quad \forall w \in W
+\end{equation}
+
+Elastic demand is allocated across choice modes via MNL. The pool size is the total demand minus fixed auto demand.
+
+\subsubsection{Flow Conservation (Path to Mode)}
+
+\begin{equation}\label{eq:flow_conservation}
+\sum_{k \in K_w^m} f_k^{w,m} = q_w^m, \quad \forall w \in W, \; m \in \mathcal{M}_{Choice}
+\end{equation}
+
+\subsection{Section 4: Detailed Mathematical Proof of Compliance}
+
+In this section, we provide an exhaustive derivation of the Karush-Kuhn-Tucker (KKT) optimality conditions. We explicitly prove that the minimization of the proposed objective function $Z$ mathematically necessitates the satisfaction of all five behavioral rules defined in the problem statement.
+
+\subsubsection{4.1 Preliminaries: The Chain Rule for Congestion}
+
+Before deriving the specific conditions for each mode, we must establish the derivative of the congestion term with respect to the decision variable (passenger flow $f_k^{w,m}$).
+
+Let the congestion component of the objective function be $J$:
+$$ J = \sum_{a \in A} \int_0^{v_a} (-\beta_{time}) t_a(x) \, dx $$
+
+Using the Fundamental Theorem of Calculus and the Chain Rule:
+\begin{align*}
+\frac{\partial J}{\partial f_k^{w,m}} &= \sum_{a \in A} \frac{\partial}{\partial v_a} \left( \int_0^{v_a} (-\beta_{time}) t_a(x) \, dx \right) \cdot \frac{\partial v_a}{\partial f_k^{w,m}} \\
+&= \sum_{a \in A} \left[ (-\beta_{time}) \cdot t_a(v_a) \right] \cdot \frac{\partial v_a}{\partial f_k^{w,m}}
+\end{align*}
+
+Recall the definition of link volume $v_a$ (Eq. \ref{eq:volume}):
+$$ v_a = \sum_{w,m,k} \delta_{ak} \cdot f_k^{w,m} \cdot \frac{\eta_m}{O_m} $$
+Thus, the partial derivative of volume w.r.t. flow is:
+\begin{equation} \label{eq:chain_derivative}
+    \frac{\partial v_a}{\partial f_k^{w,m}} = \sum_{a \in k} \frac{\eta_m}{O_m}
+\end{equation}
+
+Substituting Eq. (\ref{eq:chain_derivative}) back into the derivative of $J$:
+\begin{equation} \label{eq:marginal_congestion}
+    \frac{\partial J}{\partial f_k^{w,m}} = -\beta_{time} \cdot \frac{\eta_m}{O_m} \sum_{a \in k} t_a(v_a)
+\end{equation}
+\textit{Mathematical Interpretation:} This term represents the marginal congestion disutility generated by one additional passenger. It is the path travel time scaled by the vehicle-to-passenger ratio ($\eta/O$).
+
+\subsubsection{4.2 Proof for Rules 1, 2, \& 3: Auto, Capacity, and PCE}
+
+\textbf{Goal:} Prove that Auto users follow SUE path choice, do not participate in MNL, and their impact is weighted by PCE/Occupancy.
+
+We formulate the Lagrangian $\mathcal{L}$ for the specific constraints related to Auto. Since Auto demand is fixed ($\bar{D}_w^{Auto}$), we only look at the flow conservation constraint (Eq. \ref{eq:cons_auto}).
+
+$$ \frac{\partial \mathcal{L}}{\partial f_k^{w,Auto}} = \frac{\partial Z}{\partial f_k^{w,Auto}} - \lambda_w^{Auto} = 0 $$
+
+Expanding the terms:
+\begin{enumerate}
+  \item \textbf{Congestion Term:} From Eq. (\ref{eq:marginal_congestion}), using $\eta_{Auto}$ and $O_{Auto}$:
+    $$ -\beta_{time} \frac{\eta_{Auto}}{O_{Auto}} \sum_{a \in k} t_a(v_a) $$
+  \item \textbf{Fixed Utility Term:} $-\Psi_k^{Auto}$ (ASC + monetary costs, from Section 2.1)
+  \item \textbf{Entropy Term:} $\frac{1}{\theta} (\ln f_k^{w,Auto} + 1 - 1) = \frac{1}{\theta} \ln f_k^{w,Auto}$
+\end{enumerate}
+
+The KKT condition is:
+$$ -\Psi_k^{Auto} - \beta_{time} \frac{\eta_{Auto}}{O_{Auto}} T_k(\mathbf{v}) + \frac{1}{\theta} \ln f_k^{w,Auto} - \lambda_w^{Auto} = 0 $$
+
+Define the \textbf{complete path utility} $V_k^{Auto} = \Psi_k^{Auto} + \beta_{time} \frac{\eta_{Auto}}{O_{Auto}} T_k(\mathbf{v})$ (matching Section 2.1). Rearranging:
+$$ \ln f_k^{w,Auto} = \theta \lambda_w^{Auto} + \theta V_k^{Auto} $$
+\begin{equation}
+    f_k^{w,Auto} = \exp(\theta \lambda_w^{Auto}) \cdot \exp(\theta V_k^{Auto})
+\end{equation}
+
+\textbf{Verification of Rules:}
+\begin{itemize}
+    \item \textbf{Rule 1 (SUE & No MNL):} The flow follows the Logit path choice formula (SUE). Since $q_w^{Auto}$ is not a variable in the objective function, there is no upper-level logit allocation. The term $\exp(\theta \lambda_w^{Auto})$ acts purely as a scaling factor to satisfy $\sum f = \bar{D}^{Auto}$.
+    \item \textbf{Rule 2 & 3 (Capacity & PCE):} The term $\frac{\eta_{Auto}}{O_{Auto}}$ in the utility explicitly accounts for the vehicle capacity and PCE. For Auto, this ratio is $\approx 1/1.2 = 0.83$, meaning the passenger bears the majority of the vehicle's congestion cost.
+\end{itemize}
+
+\subsubsection{4.3 Proof for Rules 4 \& 5: Elastic Modes (Bus, RH, Metro)}
+
+\textbf{Goal:} Prove that the minimization leads to a Nested Logit structure for mode choice. Specifically, we demonstrate how the general nested form simplifies for single-path modes (Metro), ensuring scale consistency across all choice modes.
+
+For any mode $m \in \mathcal{M}_{Choice}$, the Lagrangian involves both path constraints ($\lambda_w^m$) and the shared demand constraint ($\gamma_w$).
+
+\paragraph{Step 4.3.1: The Lower Level (Path Choice SUE)}
+
+Differentiating the Lagrangian w.r.t path flow $f_k^{w,m}$:
+$$ \frac{\partial \mathcal{L}}{\partial f_k^{w,m}} = -\Psi_k^{w,m} - \beta_{time} \frac{\eta_m}{O_m} \sum_{a \in k} t_a(v_a) + \frac{1}{\theta} \ln f_k^{w,m} - \lambda_w^m = 0 $$
+
+Define the complete path utility $V_k^{w,m} = \Psi_k^{w,m} + \beta_{time} \frac{\eta_m}{O_m} \sum_{a \in k} t_a(v_a)$ (matching Sections 2.2-2.3). Rearranging:
+$$ \ln f_k^{w,m} = \theta \lambda_w^m + \theta V_k^{w,m} $$
+
+Solving for path flow yields the SUE condition:
+\begin{equation} \label{eq:choice_path_flow}
+    f_k^{w,m} = \exp(\theta \lambda_w^m) \cdot \exp(\theta V_k^{w,m})
+\end{equation}
+
+To relate the shadow price $\lambda_w^m$ to the mode demand $q_w^m$, we sum over all paths $k \in K_w^m$:
+$$ q_w^m = \sum_k f_k^{w,m} = \exp(\theta \lambda_w^m) \sum_{k \in K_w^m} \exp(\theta V_k^{w,m}) $$
+
+We explicitly define the \textbf{Inclusive Value (Logsum)} term:
+\begin{equation} \label{eq:iv_definition}
+    \mathcal{IV}_w^m = \ln \left( \sum_{k \in K_w^m} \exp(\theta V_k^{w,m}) \right)
+\end{equation}
+
+Solving for $\lambda_w^m$:
+\begin{equation} \label{eq:lambda_sub}
+    \lambda_w^m = \frac{1}{\theta} \ln q_w^m - \frac{1}{\theta} \mathcal{IV}_w^m
+\end{equation}
+
+\paragraph{Step 4.3.2: The Upper Level (Mode Choice)}
+
+Differentiating the Lagrangian w.r.t mode demand $q_w^m$:
+$$ \frac{\partial Z}{\partial q_w^m} + \lambda_w^m - \gamma_w = 0 \implies \frac{1}{\mu} \ln q_w^m + \lambda_w^m = \gamma_w $$
+
+Substituting Eq. (\ref{eq:lambda_sub}) into this KKT condition:
+$$ \frac{1}{\mu} \ln q_w^m + \left( \frac{1}{\theta} \ln q_w^m - \frac{1}{\theta} \mathcal{IV}_w^m \right) = \gamma_w $$
+
+Rearranging to solve for $q_w^m$:
+$$ \left( \frac{1}{\mu} + \frac{1}{\theta} \right) \ln q_w^m = \gamma_w + \frac{1}{\theta} \mathcal{IV}_w^m $$
+
+Let $\Lambda = \frac{\mu \theta}{\mu + \theta}$ be the composite scale parameter. Multiplying by $\Lambda$:
+\begin{equation} \label{eq:general_demand}
+    \ln q_w^m = \Lambda \gamma_w + \frac{\Lambda}{\theta} \mathcal{IV}_w^m
+\end{equation}
+
+\paragraph{Step 4.3.3: Unified Treatment for All Choice Modes}
+
+\textbf{Key Insight:} In reality, all choice modes (Bus, RH, Metro) can have multiple path options. For example:
+\begin{itemize}
+    \item \textbf{Bus}: Different routes with different numbers of transfers
+    \item \textbf{Ride-hailing}: Different routing strategies (fastest, cheapest, avoid highways)
+    \item \textbf{Metro}: Multiple line combinations (e.g., Line 1→2 vs. Line 3→4), express vs. local trains
+\end{itemize}
+
+Therefore, we treat all choice modes uniformly with $|K_w^m| \geq 1$.
+
+\textbf{General Form (Applies to Bus, RH, Metro):}
+
+For any mode $m \in \mathcal{M}_{Choice}$ with multiple paths, the Inclusive Value is:
+$$ \mathcal{IV}_w^m = \ln \sum_{k \in K_w^m} \exp(\theta V_k^{w,m}) $$
+
+Substituting into Eq. (\ref{eq:general_demand}):
+$$ \ln q_w^m = \Lambda \gamma_w + \frac{\Lambda}{\theta} \mathcal{IV}_w^m $$
+
+The mode demand becomes:
+\begin{equation}
+    q_w^m \propto \exp \left( \frac{\Lambda}{\theta} \cdot \ln \sum_{k \in K_w^m} \exp(\theta V_k^{w,m}) \right) = \exp \left( \frac{\Lambda}{\theta} \mathcal{IV}_w^m \right)
+\end{equation}
+
+\textbf{This unified form applies to ALL choice modes, including Metro.}
+
+\textbf{Special Case: Single-Path Modes}
+
+If a particular OD-mode combination happens to have only one viable path ($|K_w^m| = 1$), the math still works:
+$$ \mathcal{IV}_w^m = \ln \exp(\theta V_{single}^{w,m}) = \theta V_{single}^{w,m} $$
+$$ q_w^m \propto \exp \left( \frac{\Lambda}{\theta} \cdot \theta V_{single}^{w,m} \right) = \exp(\Lambda V_{single}^{w,m}) $$
+
+The $\theta$ cancels naturally, but this is just a special case of the general formula, not requiring separate treatment.
+
+\textbf{Practical Implementation:}
+\begin{itemize}
+    \item If Metro has multiple lines: define multiple paths $k \in K_w^{Metro}$, each with utility $V_k^{Metro}$
+    \item If Metro has effectively one dominant path: set $K_w^{Metro} = \{k^*\}$ with single utility $V_{k^*}^{Metro}$
+    \item The same objective function and KKT conditions work for both cases
+\end{itemize}
+
+\paragraph{Step 4.3.4: Final Unified Probability}
+
+The probability $P(m)$ for choice users is derived by normalizing the demand terms derived above.
+
+$$ P(m) = \frac{\text{ExpTerm}_m}{\sum_{n \in \mathcal{M}_{Choice}} \text{ExpTerm}_n} $$
+
+\textbf{Unified form for all choice modes:}
+\begin{equation}
+\text{ExpTerm}_m = \exp \left( \frac{\Lambda}{\theta} \mathcal{IV}_w^m \right) = \exp \left( \frac{\Lambda}{\theta} \ln \sum_{k \in K_w^m} \exp(\theta V_k^{w,m}) \right), \quad \forall m \in \{Bus, RH, Metro, Other\}
+\end{equation}
+
+This is the standard Nested Logit formula where:
+\begin{itemize}
+    \item $\theta$: path choice dispersion (lower level SUE)
+    \item $\mu$: mode choice scale (upper level MNL)
+    \item $\Lambda = \frac{\mu\theta}{\mu+\theta}$: composite scale parameter
+    \item $\frac{\Lambda}{\theta}$: logsum coefficient (must be $\in (0,1)$ for consistency with random utility theory)
+\end{itemize}
+
+\textbf{Conclusion of Proof:}
+The model rigorously derives a consistent probabilistic choice structure where:
+\begin{enumerate}
+    \item \textbf{All choice modes} (Bus, RH, Metro, Other) are treated uniformly as nested logit structures with path-level randomness ($\theta$) nested under mode-level randomness ($\mu$).
+    \item The formulation naturally handles both multi-path modes (Bus/RH with many routes) and effectively single-path modes (Metro with one dominant line) through the same mathematical framework.
+    \item The logsum coefficient $\frac{\Lambda}{\theta}$ ensures consistency with McFadden's GEV theory, where lower-level choices must be "more dispersed" than upper-level choices.
+\end{enumerate}
+
+\section{Single-Level MILP Reformulation}
+
+To solve the original bilevel problem, we convert the lower-level optimization into constraints via strong duality and outer approximation.
+
+\subsection{Step 1: Piecewise Linear Approximation of Five-Term Objective}
+
+The lower-level objective contains five components, some nonlinear (convex) terms that require linearization:
+
+\begin{align*}
+Z = & \underbrace{\sum_a \int_0^{v_a} (-\beta_{time}) t_a(x) dx}_{\text{(A) Beckmann}} + \underbrace{-\sum_{w,m,k} f_k^{w,m} \Psi_k^{w,m}}_{\text{(B) Fixed Utility}} \\
+& + \underbrace{\frac{1}{\theta}\sum_{w,k} f_k^{w,Auto}(\ln f_k^{w,Auto} - 1)}_{\text{(C) Auto Entropy}} \\
+& + \underbrace{\frac{1}{\theta}\sum_{w,m \in \mathcal{M}_{Choice},k} f_k^{w,m}(\ln f_k^{w,m} - 1)}_{\text{(D) Choice Path Entropy}} \\
+& + \underbrace{\frac{1}{\mu}\sum_{w,m} q_w^m(\ln q_w^m - 1)}_{\text{(E) MNL Entropy}}
+\end{align*}
+
+\subsubsection{(A) Beckmann Integral Linearization}
+
+The global congestion cost is a strictly convex function of total link volume $v_a$:
+\[
+B = \sum_a \int_0^{v_a} (-\beta_{time}) t_a(\xi) d\xi
+\]
+
+We use piecewise linear outer approximation with breakpoints $\{\phi_1, \phi_2, \ldots, \phi_R\}$ (relative to link capacity). At each breakpoint $r$:
+\begin{equation} \label{eq:beckmann_linear}
+\tau_a \ge (-\beta_{time}) \left[ t_a(v_a^r) \cdot (v_a - v_a^r) + \int_0^{v_a^r} t_a(\xi) d\xi \right], \quad \forall a, r
+\end{equation}
+
+where $v_a^r = \phi_r \cdot C_a$ is the volume at breakpoint $r$, and the slope $(-\beta_{time}) t_a(v_a^r)$ is pre-computed using BPR function.
+
+\subsubsection{(B) Fixed Utility Term}
+
+This term is linear and requires no approximation:
+\[
+-\sum_{w,m,k} f_k^{w,m} \Psi_k^{w,m}
+\]
+
+Incorporate directly into the MILP objective.
+
+\subsubsection{(C) Auto Path Entropy Linearization}
+
+For Auto (fixed-demand mode), the entropy is:
+\[
+E_{Auto} = \frac{1}{\theta}\sum_w \sum_{k \in K_w^{Auto}} f_k^{w,Auto}(\ln f_k^{w,Auto} - 1)
+\]
+
+Use auxiliary variable $\varphi_k^{Auto}$ with piecewise linear approximation at breakpoints $\{\hat{f}_1^{Auto}, \hat{f}_2^{Auto}, \ldots\}$:
+\begin{equation} \label{eq:auto_entropy_linear}
+\varphi_k^{Auto} \ge (1 + \ln \hat{f}_j^{Auto}) f_k^{w,Auto} - \hat{f}_j^{Auto}, \quad \forall k, j
+\end{equation}
+
+\subsubsection{(D) Choice Path Entropy Linearization}
+
+For choice modes ($m \in \mathcal{M}_{Choice}$), the entropy is:
+\[
+E_{Choice,Path} = \frac{1}{\theta}\sum_w \sum_{m \in \mathcal{M}_{Choice}} \sum_{k \in K_w^m} f_k^{w,m}(\ln f_k^{w,m} - 1)
+\]
+
+Use auxiliary variable $\varphi_k^{Choice}$ with breakpoints $\{\hat{f}_1^{Choice}, \hat{f}_2^{Choice}, \ldots\}$:
+\begin{equation} \label{eq:choice_entropy_linear}
+\varphi_k^{Choice} \ge (1 + \ln \hat{f}_j^{Choice}) f_k^{w,m} - \hat{f}_j^{Choice}, \quad \forall k, m \in \mathcal{M}_{Choice}, j
+\end{equation}
+
+\subsubsection{(E) MNL Entropy Linearization}
+
+For mode demands, the entropy is:
+\[
+E_{MNL} = \frac{1}{\mu}\sum_w \sum_{m \in \mathcal{M}_{Choice}} q_w^m(\ln q_w^m - 1)
+\]
+
+Use auxiliary variable $\xi_w^m$ with breakpoints $\{\hat{q}_1^m, \hat{q}_2^m, \ldots\}$:
+\begin{equation} \label{eq:mnl_entropy_linear}
+\xi_w^m \ge (1 + \ln \hat{q}_j^m) q_w^m - \hat{q}_j^m, \quad \forall w, m \in \mathcal{M}_{Choice}, j
+\end{equation}
+
+\textbf{Summary of Linearization Variables:}
+\begin{itemize}
+    \item $\tau_a$: Beckmann integral approximation for link $a$
+    \item $\varphi_k^{Auto}$: Auto path entropy approximation for path $k \in K_w^{Auto}$
+    \item $\varphi_k^{Choice}$: Choice path entropy approximation for path $k \in K_w^m$, $m \in \mathcal{M}_{Choice}$
+    \item $\xi_w^m$: MNL entropy approximation for mode demand $q_w^m$
+\end{itemize}
+
+\subsection{Step 2: Strong Duality and Dual Formulation}
+
+After linearization, the lower-level problem becomes a linear program (LP):
+
+\textbf{Primal LP (Linearized Lower Level):}
+
+\begin{align}
+\text{minimize} & \quad \sum_a \tau_a - \sum_{w,k} f_k^{w,Auto} \Psi_k^{w,Auto} - \sum_{w,m \in \mathcal{M}_{Choice},k} f_k^{w,m} \Psi_k^{w,m} \\
+& + \frac{1}{\theta} \sum_w \sum_k \varphi_k^{Auto} + \frac{1}{\theta} \sum_w \sum_{m,k} \varphi_k^{Choice} + \frac{1}{\mu} \sum_w \sum_m \xi_w^m \\
+\text{subject to:} & \\
+& \text{(Linearity)} \quad \text{Eq. (\ref{eq:beckmann_linear}), (\ref{eq:auto_entropy_linear}), (\ref{eq:choice_entropy_linear}), (\ref{eq:mnl_entropy_linear})} \\
+& \text{(Fixed Auto)} \quad \sum_{k \in K_w^{Auto}} f_k^{w,Auto} = \bar{D}_w^{Auto}, \quad \forall w \in W \quad \text{(Dual: } \lambda_w^{Auto}) \\
+& \text{(Choice Conservation)} \quad \sum_{m \in \mathcal{M}_{Choice}} q_w^m = D_w - \bar{D}_w^{Auto}, \quad \forall w \in W \quad \text{(Dual: } \gamma_w) \\
+& \text{(Path Conservation)} \quad \sum_{k \in K_w^m} f_k^{w,m} = q_w^m, \quad \forall w, m \in \mathcal{M}_{Choice} \quad \text{(Dual: } \lambda_w^m) \\
+& \text{(Link Flow)} \quad v_a = \sum_{w,m,k} f_k^{w,m} \cdot \delta_{ak}^{w,m} \cdot \frac{\eta_m}{O_m}, \quad \forall a \in A \quad \text{(Dual: } \rho_a) \\
+& \text{(Non-negativity)} \quad f_k^{w,m}, q_w^m, v_a, \tau_a, \varphi_k, \xi_w^m \ge 0
+\end{align}
+
+\textbf{Dual LP:}
+
+For the linearized primal, we formulate the dual by introducing dual variables for each constraint:
+\begin{itemize}
+    \item $\lambda_w^{Auto}$ (unrestricted): dual for fixed Auto demand constraint
+    \item $\lambda_w^m$ (unrestricted): dual for path conservation constraint (Choice modes)
+    \item $\gamma_w$ (unrestricted): dual for choice demand conservation constraint
+    \item $\rho_a$ (unrestricted): dual for link flow definition
+    \item $\alpha_{a,r}$ (non-negative): dual for Beckmann linearization constraints at breakpoint $r$ for link $a$
+    \item $\beta_{k,j}$ (non-negative): dual for path entropy linearization (Auto and Choice) at breakpoint $j$ for path $k$
+    \item $\eta_{w,m,j}$ (non-negative): dual for MNL entropy linearization at breakpoint $j$ for OD $w$ mode $m$
+\end{itemize}
+
+\textbf{Dual Objective:}
+
+\begin{equation} \label{eq:dual_objective}
+\begin{aligned}
+\max Z_D = & \sum_w \bar{D}_w^{Auto} \lambda_w^{Auto} + \sum_w (D_w - \bar{D}_w^{Auto}) \gamma_w \\
+& + \sum_{a,r} B_a(v_a^r) \alpha_{a,r} + \sum_{k,j} \hat{f}_j \beta_{k,j} + \sum_{w,m,j} \hat{q}_j \eta_{w,m,j}
+\end{aligned}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $B_a(v_a^r) = (-\beta_{time}) \int_0^{v_a^r} t_a(\xi) d\xi$: intercept of Beckmann linearization at breakpoint $r$
+    \item $\hat{f}_j$: intercept term for path entropy linearization at breakpoint $j$ (equals $-\hat{f}_j$ from constraint RHS)
+    \item $\hat{q}_j$: intercept term for mode demand entropy linearization at breakpoint $j$ (equals $-\hat{q}_j$ from constraint RHS)
+\end{itemize}
+
+\textbf{Dual Constraints (Complementary Slackness / KKT Stationarity):}
+
+\textbf{Note:} These constraints use $\Psi_k^{w,m}$ (fixed utility only) because the congestion term is handled separately through $\rho_a$ and the Beckmann linearization. The term $\sum_a \delta_{ak} \rho_a$ represents the marginal congestion cost along path $k$.
+
+For Auto path flows:
+\begin{equation}
+\begin{aligned}
+\Psi_k^{w,Auto} + \sum_a \delta_{ak} \rho_a + \sum_j (1 + \ln \hat{f}_j) \beta_{k,j} &\ge \lambda_w^{Auto}, \\
+& \forall k \in K_w^{Auto}
+\end{aligned}
+\end{equation}
+with $\sum_j \beta_{k,j} = \frac{1}{\theta}$ (from primal constraint)
+
+For choice path flows:
+\begin{equation}
+\begin{aligned}
+\Psi_k^{w,m} + \sum_a \delta_{ak} \rho_a + \sum_j (1 + \ln \hat{f}_j) \beta_{k,j} &\ge \lambda_w^m, \\
+& \forall k \in K_w^m, \; m \in \mathcal{M}_{Choice}
+\end{aligned}
+\end{equation}
+with $\sum_j \beta_{k,j} = \frac{1}{\theta}$ (from primal constraint)
+
+For choice mode demands:
+\begin{equation}
+\begin{aligned}
+-\lambda_w^m + \gamma_w + \sum_j (1 + \ln \hat{q}_j) \eta_{w,m,j} &\ge 0, \\
+& \forall w, m \in \mathcal{M}_{Choice}
+\end{aligned}
+\end{equation}
+with $\sum_j \eta_{w,m,j} = \frac{1}{\mu}$ (from primal constraint)
+
+For link volumes (from Beckmann derivative):
+\begin{equation}
+\rho_a - \sum_r (-\beta_{time}) t_a(v_a^r) \alpha_{a,r} \le 0, \quad \forall a
+\end{equation}
+with $\sum_r \alpha_{a,r} = 1$ (from primal constraint)
+
+\textbf{Strong Duality Equality:}
+
+By strong duality for linear programs:
+\begin{equation} \label{eq:strong_duality}
+Z_{\text{Primal}} = Z_{\text{Dual}}
+\end{equation}
+
+This equality is the key constraint that couples upper and lower levels in the MILP reformulation.
+
+\subsection{Step 3: Coupling Upper and Lower Levels via Big-M Linearization}
+
+To integrate operator decisions $(x, w, n)$ with user responses $(f, q, v, \tau, \varphi, \xi)$ and dual variables, we use Big-M constraints to enforce binary logic.
+
+\textbf{(Big-M 1) Route Activation Forces Path Inactivity:}
+\begin{equation} \label{eq:bigm_path_activation}
+f_k^{w,m} \le M_k \cdot x_{r(k)}, \quad \forall k, w, m
+\end{equation}
+
+If route $r(k)$ is closed ($x_r = 0$), no passenger flow is allowed on paths using route $r(k)$.
+
+\textbf{(Big-M 2) Bus Demand Activation:}
+\begin{equation} \label{eq:bigm_bus_demand}
+q_w^B \le M_w^B \cdot \sum_{r \in R_w} x_r, \quad \forall w
+\end{equation}
+
+Bus demand can only be nonzero if at least one bus route serving OD $w$ is activated.
+
+\textbf{(Big-M 3) Dual Variable Activation (for Strong Duality):}
+\begin{equation} \label{eq:bigm_dual_active}
+\alpha_{a,r} \le M_a \cdot y_{a,r}, \quad \forall a, r
+\end{equation}
+
+where $y_{a,r}$ is a binary variable indicating whether breakpoint $r$ is active for link $a$. Similar constraints enforce that dual variables are active only when primal variables are active (complementary slackness implicitly handled via the strong duality equation).
+
+\textbf{Upper Level Constraints:}
+
+\paragraph{Constraint 1: Headway Selection (Single Choice)}
+\begin{equation}\label{eq:headway_selection}
+\sum_k w_{rk} = x_r, \quad \forall r
+\end{equation}
+
+\textbf{Interpretation:}
+\begin{itemize}
+    \item If a route is activated ($x_r = 1$), exactly one headway option must be selected ($\sum_k w_{rk} = 1$)
+    \item If a route is not activated ($x_r = 0$), no headway can be chosen ($\sum_k w_{rk} = 0$)
+    \item This enforces: \emph{open routes must have an explicit frequency; closed routes have none}
+\end{itemize}
+
+\textbf{Example:} three headway options $k \in \{1,2,3\}$ (e.g., 5/10/15 minutes):
+\begin{itemize}
+    \item $x_r = 1, w_{r1}=1, w_{r2}=0, w_{r3}=0$ --- route is open with 5-minute headway
+    \item $x_r = 0, w_{r1}=0, w_{r2}=0, w_{r3}=0$ --- route is closed, no frequency
+\end{itemize}
+
+\paragraph{Constraint 2: Bus Fleet Size and Capacity Constraint}
+
+\textbf{Design choice (no transfers):} each bus path is one physical route (point-to-point, no transfers). Path $k$ maps one-to-one to route $r(k)$. The system must decide the \emph{number of buses} ($n_r$) deployed on each route to handle user demand.
+
+\subparagraph{Fleet capacity constraint:}
+\begin{equation}\label{eq:bus_fleet_capacity}
+n_r \times C_B \ge \sum_{w \in W} \sum_{k \in K_w^B: r(k)=r} f_k^{w,B} \quad \forall r \in R
+\end{equation}
+
+\subparagraph{Fleet activation constraint:}
+\begin{equation}\label{eq:bus_fleet_activation}
+n_r \le n_{\max} \times x_r \quad \forall r \in R
+\end{equation}
+
+\textbf{Symbols (reusing existing notation):}
+\begin{itemize}
+    \item $R$: candidate bus routes; $J_r$: headway options for route $r$
+    \item $K_w^B$: bus paths for OD $w$ (each path corresponds to one route $r(k)$)
+    \item $f_k^{w,B}$: path flow for bus mode
+    \item $C_B$: capacity per bus (pax/veh)
+    \item $H_j$: headway option $j$ (minutes)
+    \item $w_{rj} \in \{0,1\}$: route $r$ selects headway $j$; $x_r \in \{0,1\}$: route activation
+    \item $n_r \in \mathbb{Z}_+$: \textbf{(NEW)} number of buses deployed on route $r$
+    \item $n_{\max}$: upper bound on fleet size per route
+\end{itemize}
+
+\textbf{Meaning of \eqref{eq:bus_fleet_capacity}:}
+
+Total passenger demand on route $r$ cannot exceed total vehicle capacity. The sum of all bus path flows using route $r$ must satisfy:
+$$\text{Route } r \text{ flow} = \sum_{w \in W} \sum_{k \in K_w^B: r(k)=r} f_k^{w,B} \le n_r \times C_B$$
+
+\textbf{This is the primary constraint: fleet size times per-vehicle capacity ensures all users are seated.}
+
+\textbf{Meaning of \eqref{eq:bus_fleet_activation}:}
+
+Buses only exist when the route is active: if $x_r = 0$, then $n_r = 0$.
+
+\textbf{Path activation (unchanged):}
+\begin{equation}\label{eq:path_route_linking}
+f_k^{w,B} \le M_w \cdot x_{r(k)} \quad \forall w \in W,\; k \in K_w^B
+\end{equation}
+
+Path $k$ can carry positive flow only if its route is activated ($x_{r(k)}=1$).
+
+
+\section{Final Single-Level MILP}
+
+\subsection{Complete Formulation}
+
+\begin{align}
+\min_{x,w,n,f,q,v,\tau,\varphi,\xi,\lambda,\gamma,\rho,\alpha,\beta,\eta} \quad & Z_{\text{op}}(x,w,n) + Z_{\text{user}}(f,q,v) + Z_{\text{bg}}(v) \\
+\text{s.t.} \quad & \text{Upper Level Constraints:} \\
+& \sum_k w_{rk} = x_r, \quad \forall r \\
+& n_r \times C_B \ge \sum_{w \in W} \sum_{k \in K_w^B: r(k)=r} f_k^{w,B}, \quad \forall r \\
+& n_r \le n_{\max} \times x_r, \quad \forall r \\
+& f_k^{w,B} \le M_w \cdot x_{r(k)}, \quad \forall w, k \\
+& \\
+& \text{Lower Level Primal (Linearized):} \\
+& \sum_k f_k^{w,m} = q_w^m, \quad \forall w,m \\
+& \sum_m q_w^m = D_w, \quad \forall w \\
+& v_a = \sum_{w,m,k} f_k^{w,m} \delta_{ak}, \quad \forall a \\
+& \tau_a \ge \overline{\beta}_{TT} [t_a(v_a^r)(v_a - v_a^r) + B_a(v_a^r)], \quad \forall a,r \\
+& \varphi_k \ge (1+\ln \hat{f}_j) f_k - \hat{f}_j, \quad \forall k,j \\
+& \xi_w^m \ge (1+\ln \hat{q}_j) q_w^m - \hat{q}_j, \quad \forall w,m,j \\
+& \\
+& \text{Lower Level Dual (Stationarity):} \\
+& \rho_a - \sum_r (-\beta_{time}) t_a(v_a^r) \alpha_{a,r} \le 0, \quad \forall a \\
+& \Psi_k^{w,m} + \sum_a \delta_{ak} \rho_a + \sum_j (1 + \ln \hat{f}_j) \beta_{k,j} \ge \lambda_w^m, \\
+& \qquad \forall k,w,m \\
+& -\lambda_w^m + \gamma_w + \sum_j (1 + \ln \hat{q}_j) \eta_{w,m,j} \ge 0, \\
+& \qquad \forall w,m \in \mathcal{M}_{Choice} \\
+& \sum_r \alpha_{a,r} = 1, \quad \forall a \\
+& \sum_j \beta_{k,j} = \frac{1}{\theta}, \quad \forall k \\
+& \sum_j \eta_{w,m,j} = \frac{1}{\mu}, \quad \forall w,m \in \mathcal{M}_{Choice} \\
+& \\
+& \text{Strong Duality Equality:} \\
+& \overline{\beta}_{TT} \sum_a \tau_a - \sum_{w,m,k} f_k^{w,m} \Psi_k^{w,m} + \frac{1}{\theta} \sum_k \varphi_k + \frac{1}{\mu} \sum_{w,m} \xi_w^m \\
+& \quad = \sum_w \bar{D}_w^{Auto} \lambda_w^{Auto} + \sum_w (D_w - \bar{D}_w^{Auto}) \gamma_w \\
+& \qquad + \sum_{a,r} B_a(v_a^r) \alpha_{a,r} - \sum_{k,j} \hat{f}_j \beta_{k,j} - \sum_{w,m,j} \hat{q}_j \eta_{w,m,j} \\
+& \\
+& \text{Coupling (Big-M constraints):} \\
+& f_k^{w,B} \le M_w \cdot x_{r(k)}, \quad \forall w, k \in K_w^B \\
+& q_w^B \le M_w \cdot \sum_{r \in R_w} x_r, \quad \forall w \\
+& \\
+& \text{Bounds:} \\
+& x_r, w_{rk} \in \{0,1\} \\
+& f_k^{w,m}, q_w^m, v_a, \tau_a, \varphi_k, \xi_w^m \ge 0 \\
+& \lambda_w^m, \gamma_w, \rho_a \text{ free} \\
+& \alpha_{a,r}, \beta_{k,j}, \eta_{w,m,j} \ge 0
+\end{align}
+
+
+
+
+\end{document}

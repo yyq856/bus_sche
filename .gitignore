@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# Data files
+*.pkl
+*.csv
+*.json
+data/
+cache/
+*.zip
+*.tar.gz
+
+# Model outputs
+*.lp
+*.ilp
+*.mps
+*.sol
+*.log
+*_output.log
+solution_result.json
+infeasible_model.ilp
+integrated_bilevel.lp
+
+# Reports
+reports/*.txt
+reports/*.json
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Gurobi
+gurobi.log
+*.rlp
+
+# Temporary files
+tmp/
+temp/
+*.tmp
