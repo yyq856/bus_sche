@@ -30,10 +30,18 @@ except ImportError:
 class ColumnGenerationAlgorithm:
     """完整的列生成算法 - 按照伪代码实现"""
     
-    def __init__(self, params: Dict, hyper: Dict, verbose: bool = True):
+    def __init__(self, params: Dict, hyper: Dict, verbose: bool = True,
+                 max_initial_routes: int = 5,
+                 max_cols_per_iter: int = 10,
+                 pricing_order: str = "rc_desc"):
         self.params = params
         self.hyper = hyper
         self.verbose = verbose
+        # 可配置参数
+        self.max_initial_routes = max(1, int(max_initial_routes))
+        self.max_cols_per_iter = max(1, int(max_cols_per_iter))
+        # pricing_order: rc_desc | rc_asc | none
+        self.pricing_order = pricing_order if pricing_order in {"rc_desc", "rc_asc", "none"} else "rc_desc"
         
         # 算法参数
         self.G = params['graph']
@@ -49,6 +57,8 @@ class ColumnGenerationAlgorithm:
         self.Z_UB = None  # 上界
         self.gap = None
         self.iteration_history = []
+        self.final_solution = None  # Phase II的完整解
+        self.final_variables = None  # Phase II的变量字典
     
     def execute(self, max_iterations: int = 20, time_limit_phase1: int = 600, time_limit_phase2: int = 1200) -> Dict:
         """
@@ -86,6 +96,9 @@ class ColumnGenerationAlgorithm:
             'gap': self.gap,
             'num_routes': len(self.omega),
             'iteration_history': self.iteration_history,
+            'omega': self.omega,  # 最终的路由集合
+            'solution': self.final_solution,  # Phase II的解
+            'variables': self.final_variables,  # Phase II的变量
         }
     
     def _execute_phase_i_column_generation(self, max_iterations: int, time_limit: int):
@@ -164,26 +177,46 @@ class ColumnGenerationAlgorithm:
             
             if not new_routes:
                 if self.verbose:
-                    print(f"\n  [收敛] 所有路径RC ≤ 0，列生成收敛")
+                    print(f"\n  [收敛] 无路径满足RC < 0，列生成收敛")
                 break
             
             # Step 2.4: 将新路由加入Ω
             if self.verbose:
                 print(f"\n  [3/3] 正在添加新路径到路径集...")
             
+            # 所有new_routes都满足RC < -1e-6（在定价问题中已过滤）
+            # 选择最改进的路径（RC最小/最负的）
+            candidates = list(new_routes)  # 所有生成的路径都是有效的
+            
+            # 按RC值排序：rc_desc = RC最小（最负）优先，rc_asc = RC最大（最接近0）优先
+            if self.pricing_order == "rc_desc":
+                # 最负RC优先（最改进的）
+                candidates.sort(key=lambda r: r['reduced_cost'])  # 升序 = 最负在前
+            elif self.pricing_order == "rc_asc":
+                # RC最接近0的优先（最安全的改进）
+                candidates.sort(key=lambda r: r['reduced_cost'], reverse=True)  # 降序
+            # else: 保持原顺序
+            
+            # 只添加最多max_cols_per_iter条
+            candidates = candidates[:self.max_cols_per_iter]
+
             num_added = 0
-            for route in new_routes:
-                if route['reduced_cost'] > 1e-6:  # 仅接受严格正的约减成本
-                    self.omega[self.next_route_id] = {
-                        'nodes': route['nodes'],
-                        'distance_km': route['distance_km'],
-                        'reduced_cost': route['reduced_cost'],
-                    }
-                    self.next_route_id += 1
-                    num_added += 1
+            for route in candidates:
+                self.omega[self.next_route_id] = {
+                    'nodes': route['nodes'],
+                    'distance_km': route['distance_km'],
+                    'reduced_cost': route['reduced_cost'],
+                }
+                self.next_route_id += 1
+                num_added += 1
             
             if self.verbose:
-                print(f"  ✓ 已添加 {num_added} 条新路径")
+                order_note = {
+                    "rc_desc": "按RC降序",
+                    "rc_asc": "按RC升序",
+                    "none": "按生成顺序"
+                }[self.pricing_order]
+                print(f"  ✓ 已添加 {num_added} 条新路径（最多{self.max_cols_per_iter}条，{order_note}）")
                 print(f"  └─ 路径集大小: {len(self.omega)} 条")
             
             if num_added == 0:
@@ -218,8 +251,8 @@ class ColumnGenerationAlgorithm:
         Phase II: 整数规划求解
         
         步骤：
-        1. 固定Ω中的路由
-        2. 恢复整数约束和全部KKT条件
+        1. 固定Ω中的路由（与Phase I完全相同的列集）
+        2. 移除LP松弛模式，恢复整数约束和全部KKT对偶约束
         3. 求解MILP
         """
         
@@ -227,23 +260,38 @@ class ColumnGenerationAlgorithm:
             print(f"\n使用 {len(self.omega)} 条路由构建MILP模型...")
         
         try:
-            # Step 1: 准备路由集合
-            P_hat = {
-                rid: {
-                    'nodes': rdata['nodes'],
-                    'route_id': rid,
-                }
-                for rid, rdata in self.omega.items()
-            }
+            # Step 1: 准备与Phase I完全相同的路由集合
+            P_hat = {}
+            for rid, rdata in self.omega.items():
+                if rdata['nodes']:
+                    o, d = int(rdata['nodes'][0]), int(rdata['nodes'][-1])
+                    P_hat[rid] = {
+                        'nodes': rdata['nodes'],
+                        'od': (o, d),
+                        'od_pair': (o, d),
+                        'route_id': rid,
+                    }
             
-            # Step 2: 构建完整MILP模型
+            if not P_hat:
+                if self.verbose:
+                    print("[FAIL] No routes in omega for Phase II")
+                return
+            
+            # Step 2: 构建完整MILP模型（带整数约束和KKT约束）
             params_copy = self.params.copy()
             params_copy['P_hat'] = P_hat
             
             if self.verbose:
-                print("构建MILP模型（包含完整KKT约束）...")
+                print("构建MILP模型（包含完整KKT对偶约束）...")
             
-            model_result = build_integrated_bilevel_model(params_copy, self.hyper, verbose=False)
+            # 关键：relax_to_lp=False表示恢复整数约束和KKT约束
+            model_result = build_integrated_bilevel_model(
+                params_copy,
+                self.hyper,
+                verbose=False,
+                P_hat=P_hat,
+                relax_to_lp=False  # ✓ 明确指定完整MILP（带对偶约束）
+            )
             mdl = model_result["model"]
             
             # 设置时间限制
@@ -260,8 +308,13 @@ class ColumnGenerationAlgorithm:
 
             if solution and solution.objective_value is not None:
                 self.Z_UB = solution.objective_value
+                self.final_solution = solution
+                self.final_variables = model_result.get("variables", {})
+                
                 if self.verbose:
                     print(f"\n[OK] MILP solved: Z_UB = ${self.Z_UB:,.2f}")
+                    # 输出选中的路由和频率
+                    self._print_solution_summary(solution, model_result)
             else:
                 if self.verbose:
                     print("[FAIL] MILP solve failed")
@@ -272,9 +325,103 @@ class ColumnGenerationAlgorithm:
                 print(f"[FAIL] Phase II error: {e}")
             self.Z_UB = None
     
+    def _print_solution_summary(self, solution, model_result):
+        """
+        输出Phase II解的摘要：选中的路由、频率、车辆数
+        """
+        try:
+            variables = model_result.get("variables", {})
+            x = variables.get("x", {})  # 路由激活变量
+            w = variables.get("w", {})  # 频率选择变量
+            n = variables.get("n", {})  # 车队规模变量
+            
+            if not x:
+                print("\n[WARNING] No route activation variables found in solution")
+                return
+            
+            # 提取选中的路由
+            x_sol = solution.get_value_dict(x) if hasattr(solution, 'get_value_dict') else {}
+            selected_routes = [r for r, val in x_sol.items() if val > 0.5]
+            
+            if not selected_routes:
+                print("\n[INFO] No routes selected in final solution")
+                return
+            
+            print(f"\n{'='*80}")
+            print(f"PHASE II SOLUTION SUMMARY")
+            print(f"{'='*80}")
+            print(f"\n选中路由数: {len(selected_routes)}/{len(self.omega)}")
+            print(f"\n详细信息:")
+            print(f"{'路由ID':<10} {'起点→终点':<20} {'长度(km)':<12} {'频率等级':<12} {'车辆数':<10}")
+            print(f"{'-'*80}")
+            
+            # 获取频率和车队解
+            w_sol = solution.get_value_dict(w) if w and hasattr(solution, 'get_value_dict') else {}
+            n_sol = solution.get_value_dict(n) if n and hasattr(solution, 'get_value_dict') else {}
+            
+            # 获取频率等级定义
+            headway_dict = self.params.get("H_k", {})
+            
+            for r in sorted(selected_routes):
+                route_data = self.omega.get(r, {})
+                nodes = route_data.get('nodes', [])
+                if not nodes:
+                    continue
+                
+                o, d = nodes[0], nodes[-1]
+                distance = route_data.get('distance_km', 0.0)
+                
+                # 找到选中的频率等级
+                selected_headway = None
+                for (r_id, k), val in w_sol.items():
+                    if r_id == r and val > 0.5:
+                        headway_min = headway_dict.get(k, k)
+                        selected_headway = f"{k} ({headway_min}min)"
+                        break
+                
+                if selected_headway is None:
+                    selected_headway = "N/A"
+                
+                # 获取车辆数
+                fleet_size = n_sol.get(r, 0.0) if r in n_sol else 0.0
+                
+                print(f"{r:<10} {o:>5} → {d:<5}       {distance:<12.2f} {selected_headway:<12} {fleet_size:<10.1f}")
+            
+            print(f"{'-'*80}")
+            total_fleet = sum(n_sol.get(r, 0.0) for r in selected_routes if r in n_sol)
+            print(f"总车辆数: {total_fleet:.0f}")
+            print(f"{'='*80}\n")
+            
+        except Exception as e:
+            print(f"\n[WARNING] Failed to print solution summary: {e}")
+    
     def _initialize_omega(self):
-        """初始化Ω: 每个OD对一条最短路径"""
-        for o, d in self.K:
+        """初始化Ω: 仅选择指定数量的初始路线（按总需求优先）。
+
+        策略：
+        - 若可用，先按 `D_odh` 聚合的 OD 总需求降序选取前 `self.max_initial_routes` 个 OD；
+        - 对每个入选 OD，生成一条基于 `free_flow_time` 的最短路径；
+        - 若某些 OD 无法建路径，则继续按序尝试下一个 OD，直到凑满目标数量或无可选。
+        """
+
+        # 1) 计算每个OD对的总需求（若参数可用），否则按原有顺序
+        demand_by_od = {}
+        D_odh = self.params.get('D_odh', {})
+        if D_odh:
+            for (o, d, h), val in D_odh.items():
+                demand_by_od[(o, d)] = demand_by_od.get((o, d), 0.0) + float(val)
+            # 按总需求降序排列OD对
+            od_sorted = sorted(self.K, key=lambda od: demand_by_od.get(od, 0.0), reverse=True)
+        else:
+            # 无需求数据时，使用原始顺序
+            od_sorted = list(self.K)
+
+        # 2) 仅添加最多指定数量的初始路线
+        max_initial = self.max_initial_routes
+        added = 0
+        for o, d in od_sorted:
+            if added >= max_initial:
+                break
             try:
                 path = nx.shortest_path(self.G, source=o, target=d, weight='free_flow_time')
                 distance_km = sum(
@@ -286,8 +433,10 @@ class ColumnGenerationAlgorithm:
                     'distance_km': distance_km,
                 }
                 self.next_route_id += 1
+                added += 1
             except (nx.NetworkXNoPath, nx.NodeNotFound):
-                pass
+                # 若该OD无路径，尝试下一个OD
+                continue
     
     def _solve_lp_rmp(self) -> Optional[Tuple[float, Dict, Dict]]:
         """
@@ -500,14 +649,18 @@ class ColumnGenerationAlgorithm:
                     path_cost = path_op_cost + path_dual_cost
                     
                     # 计算Reduced Cost
-                    rc = gamma_od - path_cost - self.fixed_cost_route
+                    # 公式: RC = (path_cost + fixed_cost) - gamma_od
+                    # 对于等式约束，gamma_od无符号限制
+                    # 当RC为负时（相对于gamma_od），添加该路径会改进目标函数
+                    rc = path_cost + self.fixed_cost_route - gamma_od
                     
                     # 统计RC范围
                     rc_min = rc if rc_min is None else min(rc_min, rc)
                     rc_max = rc if rc_max is None else max(rc_max, rc)
                     
-                    # 只添加正RC的路径
-                    if rc > 1e-6:
+                    # 添加所有RC < 0的路径（这意味着路径成本+FC < gamma_od，即改进）
+                    # 对于最小化问题，负RC = 改进
+                    if rc < -1e-6:
                         distance_km = sum(
                             self.G.edges[path[i], path[i+1]].get("length", 0) / 1000.0
                             for i in range(len(path)-1)
@@ -533,21 +686,24 @@ class ColumnGenerationAlgorithm:
                   f"rho_min={min(rho_values) if rho_values else 0:.2f}, "
                   f"rho_max={max(rho_values) if rho_values else 0:.2f}")
             if neg_dual_edges > 0:
-                print(f"    Note: {neg_dual_edges} edges have negative dual costs; using non-negative weights for path search")
+                print(f"    Note: {neg_dual_edges} edges have negative dual costs")
             
-            # 诊断信息：为什么RC都是负的？
-            if rc_max is not None and rc_max < 0:
-                print(f"    [WARNING] All RC negative! Problem structure analysis:")
-                print(f"      - Fixed cost per route: ${self.fixed_cost_route:.2f}")
-                print(f"      - Min gamma (demand value): ${min(gamma_values):.2f}")
-                print(f"      - Issue: gamma < fixed_cost might cause all RC < 0")
-                # 计算假设的最短路成本（没有边成本，只有固定成本）
-                min_gamma = min(gamma_values)
-                print(f"      - For RC to be positive, path_cost must be < ${min_gamma - self.fixed_cost_route:.2f}")
-                print(f"      - But min_gamma=${min_gamma:.2f}, FC=${self.fixed_cost_route:.2f}")
-                print(f"      - So need path_cost < ${min_gamma - self.fixed_cost_route:.2f}")
+            # 诊断：为什么没有选择路径？
+            if rc_max is not None:
+                if rc_max >= -1e-6:  # 所有RC都 >= 0
+                    print(f"    [INFO] No paths with RC < 0 found (all RC >= 0)")
+                    print(f"      - RC range: [{rc_min:.4f}, {rc_max:.4f}]")
+                    print(f"      - This means current columns are optimal for LP relaxation")
+                    print(f"      - Max gamma_od: ${max(gamma_values) if gamma_values else 0:.2f}")
+                    print(f"      - Min path cost: ~${rc_min + max(gamma_values):.2f}")
+                    print(f"      - Fixed cost: ${self.fixed_cost_route:.2f}")
+                elif rc_pos == 0:  # 有负RC但没有被选择（不应该发生）
+                    print(f"    [WARNING] Found paths with RC < 0 but none selected!")
+                    print(f"      - RC range: [{rc_min:.4f}, {rc_max:.4f}]")
+                    print(f"      - Paths generated: {sum(1 for r in new_routes)}")
             
-            print(f"    Pricing RC stats: min={rc_min:.2f}, max={rc_max:.2f}, positive_cols={rc_pos}")
+            print(f"    Pricing stats: RC_min={rc_min:.4f}, RC_max={rc_max:.4f}, selected_paths={rc_pos}")
+
         
         return new_routes
 
